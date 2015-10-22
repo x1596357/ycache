@@ -456,7 +456,7 @@ static void __init ycache_obj_cache_destroy(void)
  * actually do a malloc
  */
 struct ycache_preload {
-	void *page;
+	struct page *page;
 	struct ycache_entry *ycache_entry;
 	struct page_entry *page_entry;
 	struct tmem_obj *obj;
@@ -472,7 +472,7 @@ static DEFINE_PER_CPU(struct ycache_preload, ycache_preloads) = {
 static int ycache_do_preload(struct tmem_pool *pool, struct page *page)
 {
 	struct ycache_preload *kp;
-	void *new_page;
+	struct page *new_page;
 	struct ycache_entry *ycache_entry;
 	struct page_entry *page_entry;
 	struct tmem_obj *obj;
@@ -494,7 +494,8 @@ static int ycache_do_preload(struct tmem_pool *pool, struct page *page)
 	kp = this_cpu_ptr(&ycache_preloads);
 
 	if (!kp->page) {
-		new_page = (void *)__get_free_page(YCACHE_GFP_MASK);
+		/* can use high memory*/
+		new_page = alloc_page(YCACHE_GFP_MASK|__GFP_HIGHMEM);
 		if (unlikely(new_page == NULL)) {
 			ycache_failed_get_free_pages++;
 			goto out;
@@ -690,7 +691,8 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 	struct page_entry *dupentry = NULL;
 	int result;
 	unsigned long count;
-	u8 hash[MD5_DIGEST_SIZE] = {0}, *src, *dst;
+	u8 hash[MD5_DIGEST_SIZE] = {0};
+	u8 *src, *dst;
 
 	pr_debug("call %s()\n", __FUNCTION__);
 	ycache_entry = ycache_get_free_yentry();
@@ -764,7 +766,7 @@ static int ycache_pampd_get_data(char *data, size_t *bufsize, bool raw,
 	int ret = -EINVAL;
 
 	pr_debug("call %s()\n", __FUNCTION__);
-	BUG_ON(is_ephemeral(pool));
+	//BUG_ON(is_ephemeral(pool));
 	BUG_ON(pampd == NULL);
 	spin_lock(&ycache_host.lock);
 	entry = (struct ycache_entry *)pampd;
