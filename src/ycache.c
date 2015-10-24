@@ -44,8 +44,9 @@
 #include <linux/frontswap.h>
 #endif
 
-#define YCACHE_GFP_MASK                                                        \
-	(__GFP_FS | __GFP_NORETRY | __GFP_NOWARN | __GFP_NOMEMALLOC)
+/*#define YCACHE_GFP_MASK \
+	(__GFP_FS | __GFP_NORETRY | __GFP_NOWARN | __GFP_NOMEMALLOC)*/
+#define YCACHE_GFP_MASK GFP_KERNEL
 
 #define LOCAL_CLIENT ((uint16_t)-1)
 
@@ -99,7 +100,7 @@ struct page_tree {
 	struct rb_root rbroot;
 };
 
-struct page_tree *page_tree;
+struct page_tree *page_tree = NULL;
 /*
  * struct page_entry
  *
@@ -146,7 +147,7 @@ static struct page_entry *page_entry_cache_alloc(gfp_t gfp)
 	entry = kmem_cache_alloc(page_entry_cache, gfp);
 	if (entry != NULL) {
 		/* alloc page*/
-		entry->page = alloc_page(gfp | __GFP_HIGHMEM);
+		entry->page = alloc_page(gfp | __GFP_HIGHMEM | __GFP_FS);
 		if (entry->page != NULL) {
 			RB_CLEAR_NODE(&entry->rbnode);
 			return entry;
@@ -164,7 +165,7 @@ static struct page_entry *page_entry_cache_alloc(gfp_t gfp)
 static void page_entry_cache_free(struct page_entry *entry)
 {
 	pr_debug("call %s()\n", __FUNCTION__);
-	if (entry->page != NULL) {
+	if (entry && entry->page != NULL) {
 		__free_page(entry->page);
 	}
 	kmem_cache_free(page_entry_cache, entry);
@@ -309,7 +310,8 @@ out:
 static int is_page_same(struct page *p1, struct page *p2)
 {
 	u8 *src, *dst;
-	int i = 0, ret = 0;
+	int i = 0;
+	int ret = 0;
 
 	pr_debug("call %s()\n", __FUNCTION__);
 	src = kmap_atomic(p1);
@@ -401,9 +403,23 @@ static int init_ycache_host(void)
 	pr_debug("call %s()\n", __FUNCTION__);
 	if (ycache_host.allocated)
 		return 0;
-	ycache_host.allocated = 1;
-	idr_init(&ycache_host.tmem_pools);
-	spin_lock_init(&ycache_host.lock);
+	else {
+		ycache_host.allocated = 1;
+		atomic_set(&ycache_host.refcount, 0);
+		idr_init(&ycache_host.tmem_pools);
+		spin_lock_init(&ycache_host.lock);
+
+		if (page_tree == NULL) {
+			page_tree =
+			    kmalloc(sizeof(struct page_tree), GFP_KERNEL);
+			if (!page_tree) {
+				pr_err("page_tree allocatinon failed\n");
+				return -ENOMEM;
+			}
+
+			page_tree->rbroot = RB_ROOT;
+		}
+	}
 	return 0;
 }
 
@@ -426,7 +442,7 @@ static struct tmem_pool *ycache_get_pool_by_id(uint16_t pool_id)
 static void ycache_put_pool(struct tmem_pool *pool)
 {
 	//	pr_debug("call %s()\n", __FUNCTION__);
-	if (!pool)
+	if (pool == NULL)
 		BUG();
 	atomic_dec(&pool->refcount);
 	atomic_dec(&ycache_host.refcount);
@@ -643,7 +659,7 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 		/* set page_entry->entry */
 		page_entry->entry = ycache_entry;
 		/* copy hash values */
-		memcpy(&page_entry->hash, hash, MD5_DIGEST_SIZE);
+		memcpy(page_entry->hash, hash, MD5_DIGEST_SIZE);
 
 		spin_lock(&ycache_host.lock);
 		result =
@@ -677,7 +693,9 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 		spin_unlock(&ycache_host.lock);
 		pampd = (void *)ycache_entry;
 		atomic_inc(&ycache_duplicate_pages);
-	} else {
+	}
+	/* hash is the same but data is not */
+	else {
 		/* TODO: add collision handling with frontswap enabled
 		 */
 		spin_unlock(&ycache_host.lock);
@@ -704,7 +722,7 @@ static int ycache_pampd_get_data(char *data, size_t *bufsize, bool raw,
 				 struct tmem_oid *oid, uint32_t index)
 {
 	struct ycache_entry *entry = NULL;
-	char *src = NULL;
+	u8 *src = NULL;
 	int ret = -EINVAL;
 
 	pr_debug("call %s()\n", __FUNCTION__);
@@ -713,6 +731,7 @@ static int ycache_pampd_get_data(char *data, size_t *bufsize, bool raw,
 	spin_lock(&ycache_host.lock);
 	entry = (struct ycache_entry *)pampd;
 	if (entry) {
+		BUG_ON(entry->src == NULL);
 		BUG_ON(entry->src->page == NULL);
 		src = kmap_atomic(entry->src->page);
 		memcpy(data, src, PAGE_SIZE);
@@ -734,7 +753,7 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 	struct ycache_entry *entry = NULL;
 	struct ycache_entry *head_ycache_entry = NULL;
 	struct llist_node *next = NULL;
-	char *src = NULL;
+	u8 *src = NULL;
 	int ret = -EINVAL;
 
 	pr_debug("call %s()\n", __FUNCTION__);
@@ -744,6 +763,7 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 	spin_lock(&ycache_host.lock);
 	entry = (struct ycache_entry *)pampd;
 	if (entry) {
+		BUG_ON(entry->src == NULL);
 		BUG_ON(entry->src->page == NULL);
 		src = kmap_atomic(entry->src->page);
 		memcpy(data, src, PAGE_SIZE);
@@ -826,8 +846,7 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 					struct ycache_entry, list.node);
 			next = head_ycache_entry->list.node.next;
 			init_llist_head(&head_ycache_entry->list.head);
-			if (next != NULL)
-				llist_add(next, &head_ycache_entry->list.head);
+			head_ycache_entry->list.head.first = next;
 			ycache_entry->src->entry = head_ycache_entry;
 		}
 	} else {
@@ -840,8 +859,7 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 		}
 		/* not the first node in the list  */
 		else {
-			while (next &&
-			       llist_entry(next->next, struct ycache_entry,
+			while (llist_entry(next->next, struct ycache_entry,
 					   list.node) != ycache_entry)
 				next = next->next;
 			next->next = next->next->next;
@@ -902,15 +920,15 @@ static int ycache_put_page(int pool_id, struct tmem_oid *oidp, uint32_t index,
 {
 	struct tmem_pool *pool;
 	int ret = -1;
-	//	unsigned long flags;
+	unsigned long flags;
 
 	pr_debug("call %s()\n", __FUNCTION__);
-	BUG_ON(!irqs_disabled());
 	pool = ycache_get_pool_by_id(pool_id);
 	if (unlikely(pool == NULL))
 		goto out;
+
+	local_irq_save(flags);
 	if (ycache_do_preload(pool, page) == 0) {
-		/* preload does preempt_disable on success */
 		ret = tmem_put(pool, oidp, index, (char *)(page), PAGE_SIZE, 0,
 			       is_ephemeral(pool));
 		if (ret < 0) {
@@ -926,6 +944,7 @@ static int ycache_put_page(int pool_id, struct tmem_oid *oidp, uint32_t index,
 			 * not */
 			(void)tmem_flush_page(pool, oidp, index);
 	}
+	local_irq_restore(flags);
 	ycache_put_pool(pool);
 out:
 	return ret;
@@ -959,17 +978,17 @@ static int ycache_flush_page(int pool_id, struct tmem_oid *oidp, uint32_t index)
 	unsigned long flags;
 
 	//	pr_debug("call %s()\n", __FUNCTION__);
-	local_irq_save(flags);
 	ycache_flush_total++;
+	local_irq_save(flags);
 	pool = ycache_get_pool_by_id(pool_id);
 	if (likely(pool != NULL)) {
 		if (atomic_read(&pool->obj_count) > 0)
 			ret = tmem_flush_page(pool, oidp, index);
 		ycache_put_pool(pool);
 	}
+	local_irq_restore(flags);
 	if (ret >= 0)
 		ycache_flush_found++;
-	local_irq_restore(flags);
 	return ret;
 }
 
@@ -980,17 +999,18 @@ static int ycache_flush_inode(int pool_id, struct tmem_oid *oidp)
 	unsigned long flags;
 
 	//	pr_debug("call %s()\n", __FUNCTION__);
-	local_irq_save(flags);
+
 	ycache_flobj_total++;
+	local_irq_save(flags);
 	pool = ycache_get_pool_by_id(pool_id);
 	if (likely(pool != NULL)) {
 		if (atomic_read(&pool->obj_count) > 0)
 			ret = tmem_flush_object(pool, oidp);
 		ycache_put_pool(pool);
 	}
+	local_irq_restore(flags);
 	if (ret >= 0)
 		ycache_flobj_found++;
-	local_irq_restore(flags);
 	return ret;
 }
 
@@ -1027,8 +1047,8 @@ static int ycache_new_pool(uint32_t flags)
 	struct tmem_pool *pool;
 
 	pr_debug("call %s()\n", __FUNCTION__);
-	atomic_inc(&ycache_host.refcount);
-	pool = kmalloc(sizeof(struct tmem_pool), GFP_ATOMIC);
+
+	pool = kmalloc(sizeof(struct tmem_pool), GFP_KERNEL);
 	if (pool == NULL) {
 		pr_info("pool creation failed: out of memory\n");
 		goto out;
@@ -1049,8 +1069,9 @@ static int ycache_new_pool(uint32_t flags)
 	pr_info("created %s tmem pool, pool_id=%d",
 		flags & TMEM_POOL_PERSIST ? "persistent" : "ephemeral",
 		pool_id);
+
+	atomic_inc(&ycache_host.refcount);
 out:
-	atomic_dec(&ycache_host.refcount);
 	return pool_id;
 }
 
@@ -1067,15 +1088,11 @@ static void ycache_cleancache_put_page(int pool_id,
 				       pgoff_t index, struct page *page)
 {
 	u32 tmp_index = (u32)index;
-	struct tmem_oid oid = *(struct tmem_oid *)&key;
-	unsigned long flags;
+	struct tmem_oid *oid = (struct tmem_oid *)&key;
 
 	pr_debug("call %s()\n", __FUNCTION__);
-	if (likely(tmp_index == index)) {
-		local_irq_save(flags);
-		(void)ycache_put_page(pool_id, &oid, index, page);
-		local_irq_restore(flags);
-	}
+	if (likely(tmp_index == index))
+		(void)ycache_put_page(pool_id, oid, index, page);
 }
 
 static int ycache_cleancache_get_page(int pool_id,
@@ -1083,12 +1100,12 @@ static int ycache_cleancache_get_page(int pool_id,
 				      pgoff_t index, struct page *page)
 {
 	u32 tmp_index = (u32)index;
-	struct tmem_oid oid = *(struct tmem_oid *)&key;
+	struct tmem_oid *oid = (struct tmem_oid *)&key;
 	int ret = -1;
 
 	//	pr_debug("call %s()\n", __FUNCTION__);
 	if (likely(tmp_index == index))
-		ret = ycache_get_page(pool_id, &oid, index, page);
+		ret = ycache_get_page(pool_id, oid, index, page);
 	return ret;
 }
 
@@ -1097,20 +1114,20 @@ static void ycache_cleancache_flush_page(int pool_id,
 					 pgoff_t index)
 {
 	u32 tmp_index = (u32)index;
-	struct tmem_oid oid = *(struct tmem_oid *)&key;
+	struct tmem_oid *oid = (struct tmem_oid *)&key;
 
 	//	pr_debug("call %s()\n", __FUNCTION__);
 	if (likely(tmp_index == index))
-		(void)ycache_flush_page(pool_id, &oid, tmp_index);
+		(void)ycache_flush_page(pool_id, oid, tmp_index);
 }
 
 static void ycache_cleancache_flush_inode(int pool_id,
 					  struct cleancache_filekey key)
 {
-	struct tmem_oid oid = *(struct tmem_oid *)&key;
+	struct tmem_oid *oid = (struct tmem_oid *)&key;
 
 	//	pr_debug("call %s()\n", __FUNCTION__);
-	(void)ycache_flush_inode(pool_id, &oid);
+	(void)ycache_flush_inode(pool_id, oid);
 }
 
 static void ycache_cleancache_flush_fs(int pool_id)
@@ -1126,13 +1143,7 @@ static int ycache_cleancache_init_fs(size_t pagesize)
 	BUG_ON(pagesize != PAGE_SIZE);
 
 	pr_debug("call %s()\n", __FUNCTION__);
-	page_tree = kmalloc(sizeof(struct page_tree), GFP_KERNEL);
-	if (!page_tree) {
-		pr_err("page_tree allocatinon failed\n");
-		return -ENOMEM;
-	}
 
-	page_tree->rbroot = RB_ROOT;
 	return ycache_new_pool(0);
 }
 
@@ -1195,15 +1206,12 @@ static int ycache_frontswap_store(unsigned type, pgoff_t offset,
 	u32 ind = (u32)offset;
 	struct tmem_oid oid = oswiz(type, ind);
 	int ret = -1;
-	unsigned long flags;
 
 	BUG_ON(!PageLocked(page));
-	if (likely(ind64 == ind)) {
-		local_irq_save(flags);
+	if (likely(ind64 == ind))
 		ret = ycache_put_page(ycache_frontswap_poolid, &oid, iswiz(ind),
 				      page);
-		local_irq_restore(flags);
-	}
+
 	return ret;
 }
 
