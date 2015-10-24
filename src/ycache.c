@@ -40,11 +40,9 @@
 #ifdef CONFIG_CLEANCACHE
 #include <linux/cleancache.h>
 #endif
-/* Not implemented yet
 #ifdef CONFIG_FRONTSWAP
 #include <linux/frontswap.h>
 #endif
-*/
 
 #define YCACHE_GFP_MASK                                                        \
 	(__GFP_FS | __GFP_NORETRY | __GFP_NOWARN | __GFP_NOMEMALLOC)
@@ -166,7 +164,7 @@ static struct page_entry *page_entry_cache_alloc(gfp_t gfp)
 static void page_entry_cache_free(struct page_entry *entry)
 {
 	pr_debug("call %s()\n", __FUNCTION__);
-	if(entry->page!=NULL){
+	if (entry->page != NULL) {
 		__free_page(entry->page);
 	}
 	kmem_cache_free(page_entry_cache, entry);
@@ -911,7 +909,6 @@ static int ycache_put_page(int pool_id, struct tmem_oid *oidp, uint32_t index,
 	pool = ycache_get_pool_by_id(pool_id);
 	if (unlikely(pool == NULL))
 		goto out;
-	preempt_disable();
 	if (ycache_do_preload(pool, page) == 0) {
 		/* preload does preempt_disable on success */
 		ret = tmem_put(pool, oidp, index, (char *)(page), PAGE_SIZE, 0,
@@ -930,7 +927,6 @@ static int ycache_put_page(int pool_id, struct tmem_oid *oidp, uint32_t index,
 			(void)tmem_flush_page(pool, oidp, index);
 	}
 	ycache_put_pool(pool);
-	preempt_enable();
 out:
 	return ret;
 }
@@ -1072,10 +1068,14 @@ static void ycache_cleancache_put_page(int pool_id,
 {
 	u32 tmp_index = (u32)index;
 	struct tmem_oid oid = *(struct tmem_oid *)&key;
+	unsigned long flags;
 
 	pr_debug("call %s()\n", __FUNCTION__);
-	if (likely(tmp_index == index))
+	if (likely(tmp_index == index)) {
+		local_irq_save(flags);
 		(void)ycache_put_page(pool_id, &oid, index, page);
+		local_irq_restore(flags);
+	}
 }
 
 static int ycache_cleancache_get_page(int pool_id,
@@ -1166,6 +1166,111 @@ struct cleancache_ops *ycache_cleancache_register_ops(void)
 
 #endif
 
+#ifdef CONFIG_FRONTSWAP
+/* a single tmem poolid is used for all frontswap "types" (swapfiles) */
+static int ycache_frontswap_poolid = -1;
+
+/*
+ * Swizzling increases objects per swaptype, increasing tmem concurrency
+ * for heavy swaploads.  Later, larger nr_cpus -> larger SWIZ_BITS
+ * Setting SWIZ_BITS to 27 basically reconstructs the swap entry from
+ * frontswap_load(), but has side-effects. Hence using 8.
+ */
+#define SWIZ_BITS 8
+#define SWIZ_MASK ((1 << SWIZ_BITS) - 1)
+#define _oswiz(_type, _ind) ((_type << SWIZ_BITS) | (_ind & SWIZ_MASK))
+#define iswiz(_ind) (_ind >> SWIZ_BITS)
+
+static inline struct tmem_oid oswiz(unsigned type, u32 ind)
+{
+	struct tmem_oid oid = {.oid = {0}};
+	oid.oid[0] = _oswiz(type, ind);
+	return oid;
+}
+
+static int ycache_frontswap_store(unsigned type, pgoff_t offset,
+				  struct page *page)
+{
+	u64 ind64 = (u64)offset;
+	u32 ind = (u32)offset;
+	struct tmem_oid oid = oswiz(type, ind);
+	int ret = -1;
+	unsigned long flags;
+
+	BUG_ON(!PageLocked(page));
+	if (likely(ind64 == ind)) {
+		local_irq_save(flags);
+		ret = ycache_put_page(ycache_frontswap_poolid, &oid, iswiz(ind),
+				      page);
+		local_irq_restore(flags);
+	}
+	return ret;
+}
+
+/* returns 0 if the page was successfully gotten from frontswap, -1 if
+ * was not present (should never happen!) */
+static int ycache_frontswap_load(unsigned type, pgoff_t offset,
+				 struct page *page)
+{
+	u64 ind64 = (u64)offset;
+	u32 ind = (u32)offset;
+	struct tmem_oid oid = oswiz(type, ind);
+	int ret = -1;
+
+	BUG_ON(!PageLocked(page));
+	if (likely(ind64 == ind))
+		ret = ycache_get_page(ycache_frontswap_poolid, &oid, iswiz(ind),
+				      page);
+	return ret;
+}
+
+/* flush a single page from frontswap */
+static void ycache_frontswap_flush_page(unsigned type, pgoff_t offset)
+{
+	u64 ind64 = (u64)offset;
+	u32 ind = (u32)offset;
+	struct tmem_oid oid = oswiz(type, ind);
+
+	if (likely(ind64 == ind))
+		(void)ycache_flush_page(ycache_frontswap_poolid, &oid,
+					iswiz(ind));
+}
+
+/* flush all pages from the passed swaptype */
+static void ycache_frontswap_flush_area(unsigned type)
+{
+	struct tmem_oid oid;
+	int ind;
+
+	for (ind = SWIZ_MASK; ind >= 0; ind--) {
+		oid = oswiz(type, ind);
+		(void)ycache_flush_inode(ycache_frontswap_poolid, &oid);
+	}
+}
+
+static void ycache_frontswap_init(unsigned ignored)
+{
+	/* a single tmem poolid is used for all frontswap "types" (swapfiles) */
+	if (ycache_frontswap_poolid < 0)
+		ycache_frontswap_poolid = ycache_new_pool(TMEM_POOL_PERSIST);
+}
+
+static struct frontswap_ops ycache_frontswap_ops = {
+    .store = ycache_frontswap_store,
+    .load = ycache_frontswap_load,
+    .invalidate_page = ycache_frontswap_flush_page,
+    .invalidate_area = ycache_frontswap_flush_area,
+    .init = ycache_frontswap_init};
+
+struct frontswap_ops *ycache_frontswap_register_ops(void)
+{
+	struct frontswap_ops *old_ops =
+	    frontswap_register_ops(&ycache_frontswap_ops);
+
+	return old_ops;
+}
+#endif
+
 /*********************************
 * debugfs functions
 **********************************/
@@ -1250,7 +1355,10 @@ static void __exit ycache_debugfs_exit(void)
 static int __init ycache_init(void)
 {
 #ifdef CONFIG_CLEANCACHE
-	struct cleancache_ops *old_ops;
+	struct cleancache_ops *old_cleancache_ops;
+#endif
+#ifdef CONFIG_FRONTSWAP
+	struct frontswap_ops *old_frontswap_ops;
 #endif
 
 	pr_info("loading ycache\n");
@@ -1275,25 +1383,17 @@ static int __init ycache_init(void)
 	}
 
 #ifdef CONFIG_CLEANCACHE
-	old_ops = ycache_cleancache_register_ops();
+	old_cleancache_ops = ycache_cleancache_register_ops();
 	pr_info("cleancache enabled using kernel transcendent memory\n");
-	if (old_ops && old_ops->init_fs != NULL)
+	if (old_cleancache_ops && old_cleancache_ops->init_fs != NULL)
 		pr_warning("cleancache_ops overridden");
 #endif
-	/*
-	#ifdef CONFIG_FRONTSWAP
-		if (ycache_enabled && use_frontswap) {
-			struct frontswap_ops old_ops;
-
-			old_ops = ycache_frontswap_register_ops();
-			pr_info("frontswap enabled using kernel "
-				"transcendent memory and zsmalloc\n");
-			if (old_ops.init != NULL)
-				pr_warning("frontswap_ops
-	overridden\n");
-		}
-	#endif
-	*/
+#ifdef CONFIG_FRONTSWAP
+	old_frontswap_ops = ycache_frontswap_register_ops();
+	pr_info("frontswap enabled using kernel transcendent memory\n");
+	if (old_frontswap_ops && old_frontswap_ops->init != NULL)
+		pr_warning("frontswap_ops overridden\n");
+#endif
 	if (ycache_debugfs_init())
 		pr_warn("debugfs initialization failed\n");
 
