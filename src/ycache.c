@@ -147,11 +147,8 @@ static struct page_entry *page_entry_cache_alloc(gfp_t gfp)
 	pr_debug("call %s()\n", __FUNCTION__);
 	entry = kmem_cache_alloc(page_entry_cache, gfp);
 	if (entry != NULL) {
-		ycache_pentry_kmemcache_fail++;
-		return NULL;
-	} else {
-		/* copy page*/
-		entry->page = alloc_page(YCACHE_GFP_MASK | __GFP_HIGHMEM);
+		/* alloc page*/
+		entry->page = alloc_page(gfp | __GFP_HIGHMEM);
 		if (entry->page != NULL) {
 			RB_CLEAR_NODE(&entry->rbnode);
 			return entry;
@@ -160,13 +157,18 @@ static struct page_entry *page_entry_cache_alloc(gfp_t gfp)
 			ycache_failed_get_free_pages++;
 			return NULL;
 		}
+	} else {
+		ycache_pentry_kmemcache_fail++;
+		return NULL;
 	}
 }
 
 static void page_entry_cache_free(struct page_entry *entry)
 {
 	pr_debug("call %s()\n", __FUNCTION__);
-	__free_page(entry->page);
+	if(entry->page!=NULL){
+		__free_page(entry->page);
+	}
 	kmem_cache_free(page_entry_cache, entry);
 }
 
