@@ -462,7 +462,7 @@ static int __init ycache_obj_cache_create(void)
 {
 	pr_debug("call %s()\n", __FUNCTION__);
 	ycache_obj_cache = kmem_cache_create(
-	    "ycache_obj", sizeof(struct tmem_objnode), 0, 0, NULL);
+	    "ycache_obj", sizeof(struct tmem_obj), 0, 0, NULL);
 	return ycache_obj_cache == NULL;
 }
 
