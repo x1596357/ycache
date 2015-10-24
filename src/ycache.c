@@ -783,8 +783,7 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 					struct ycache_entry, list.node);
 			next = head_ycache_entry->list.node.next;
 			init_llist_head(&head_ycache_entry->list.head);
-			if (next != NULL)
-				llist_add(next, &head_ycache_entry->list.head);
+			head_ycache_entry->list.head.first = next;
 			entry->src->entry = head_ycache_entry;
 		}
 	} else {
@@ -797,8 +796,7 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 		}
 		/* not the first node in the list  */
 		else {
-			while (next &&
-			       llist_entry(next->next, struct ycache_entry,
+			while (llist_entry(next->next, struct ycache_entry,
 					   list.node) != entry)
 				next = next->next;
 			next->next = next->next->next;
@@ -920,14 +918,15 @@ static int ycache_put_page(int pool_id, struct tmem_oid *oidp, uint32_t index,
 {
 	struct tmem_pool *pool;
 	int ret = -1;
-	unsigned long flags;
+	// unsigned long flags;
 
 	pr_debug("call %s()\n", __FUNCTION__);
 	pool = ycache_get_pool_by_id(pool_id);
 	if (unlikely(pool == NULL))
 		goto out;
 
-	local_irq_save(flags);
+	// local_irq_save(flags);
+	preempt_disable();
 	if (ycache_do_preload(pool, page) == 0) {
 		ret = tmem_put(pool, oidp, index, (char *)(page), PAGE_SIZE, 0,
 			       is_ephemeral(pool));
@@ -944,7 +943,8 @@ static int ycache_put_page(int pool_id, struct tmem_oid *oidp, uint32_t index,
 			 * not */
 			(void)tmem_flush_page(pool, oidp, index);
 	}
-	local_irq_restore(flags);
+	preempt_enable();
+	// local_irq_restore(flags);
 	ycache_put_pool(pool);
 out:
 	return ret;
@@ -955,11 +955,11 @@ static int ycache_get_page(int pool_id, struct tmem_oid *oidp, uint32_t index,
 {
 	struct tmem_pool *pool;
 	int ret = -1;
-	unsigned long flags;
+	// unsigned long flags;
 	size_t size = PAGE_SIZE;
 
 	//	pr_debug("call %s()\n", __FUNCTION__);
-	local_irq_save(flags);
+	// local_irq_save(flags);
 	pool = ycache_get_pool_by_id(pool_id);
 	if (likely(pool != NULL)) {
 		if (atomic_read(&pool->obj_count) > 0)
@@ -967,7 +967,7 @@ static int ycache_get_page(int pool_id, struct tmem_oid *oidp, uint32_t index,
 				       0, is_ephemeral(pool));
 		ycache_put_pool(pool);
 	}
-	local_irq_restore(flags);
+	// local_irq_restore(flags);
 	return ret;
 }
 
@@ -975,18 +975,18 @@ static int ycache_flush_page(int pool_id, struct tmem_oid *oidp, uint32_t index)
 {
 	struct tmem_pool *pool;
 	int ret = -1;
-	unsigned long flags;
+	// unsigned long flags;
 
 	//	pr_debug("call %s()\n", __FUNCTION__);
 	ycache_flush_total++;
-	local_irq_save(flags);
+	// local_irq_save(flags);
 	pool = ycache_get_pool_by_id(pool_id);
 	if (likely(pool != NULL)) {
 		if (atomic_read(&pool->obj_count) > 0)
 			ret = tmem_flush_page(pool, oidp, index);
 		ycache_put_pool(pool);
 	}
-	local_irq_restore(flags);
+	// local_irq_restore(flags);
 	if (ret >= 0)
 		ycache_flush_found++;
 	return ret;
@@ -996,19 +996,19 @@ static int ycache_flush_inode(int pool_id, struct tmem_oid *oidp)
 {
 	struct tmem_pool *pool;
 	int ret = -1;
-	unsigned long flags;
+	// unsigned long flags;
 
 	//	pr_debug("call %s()\n", __FUNCTION__);
 
 	ycache_flobj_total++;
-	local_irq_save(flags);
+	// local_irq_save(flags);
 	pool = ycache_get_pool_by_id(pool_id);
 	if (likely(pool != NULL)) {
 		if (atomic_read(&pool->obj_count) > 0)
 			ret = tmem_flush_object(pool, oidp);
 		ycache_put_pool(pool);
 	}
-	local_irq_restore(flags);
+	// local_irq_restore(flags);
 	if (ret >= 0)
 		ycache_flobj_found++;
 	return ret;
@@ -1032,9 +1032,9 @@ static int ycache_flush_fs(int pool_id)
 	while (atomic_read(&pool->refcount) != 0)
 		;
 	atomic_dec(&ycache_host.refcount);
-	local_bh_disable();
+	// local_bh_disable();
 	ret = tmem_destroy_pool(pool);
-	local_bh_enable();
+	// local_bh_enable();
 	kfree(pool);
 	pr_info("ycache: destroyed pool id=%d", pool_id);
 out:
