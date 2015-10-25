@@ -321,6 +321,7 @@ static int is_page_same(struct page *p1, struct page *p2)
 			goto out;
 
 	ret = 1;
+	pr_debug("call %s(), found one duplicate page\n", __FUNCTION__);
 out:
 	kunmap_atomic(dst);
 	kunmap_atomic(src);
@@ -384,6 +385,7 @@ static struct ycache_entry *ycache_entry_cache_alloc(gfp_t gfp)
 static void ycache_entry_cache_free(struct ycache_entry *entry)
 {
 	pr_debug("call %s()\n", __FUNCTION__);
+	BUG_ON(entry == NULL);
 	kmem_cache_free(ycache_entry_cache, entry);
 }
 
@@ -680,7 +682,7 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 		spin_unlock(&ycache_host.lock);
 	}
 	/* hash exists, compare bit by bit */
-	else if (is_page_same(page_entry->page, (struct page *)data)) {
+	else if (is_page_same(page_entry->page, page)) {
 		/* set ycache_entry->entry */
 		ycache_entry->src = page_entry;
 		/* set deduplicated */
@@ -722,7 +724,7 @@ static int ycache_pampd_get_data(char *data, size_t *bufsize, bool raw,
 				 struct tmem_oid *oid, uint32_t index)
 {
 	struct ycache_entry *entry = NULL;
-	u8 *src = NULL;
+	u8 *src = NULL, *dst = NULL;
 	int ret = -EINVAL;
 
 	pr_debug("call %s()\n", __FUNCTION__);
@@ -733,8 +735,11 @@ static int ycache_pampd_get_data(char *data, size_t *bufsize, bool raw,
 	if (entry) {
 		BUG_ON(entry->src == NULL);
 		BUG_ON(entry->src->page == NULL);
+		BUG_ON(data == NULL);
 		src = kmap_atomic(entry->src->page);
-		memcpy(data, src, PAGE_SIZE);
+		dst = kmap_atomic((struct page *)data);
+		memcpy(dst, src, PAGE_SIZE);
+		kunmap_atomic(dst);
 		kunmap_atomic(src);
 	} else {
 		goto out;
@@ -753,7 +758,7 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 	struct ycache_entry *entry = NULL;
 	struct ycache_entry *head_ycache_entry = NULL;
 	struct llist_node *next = NULL;
-	u8 *src = NULL;
+	u8 *src = NULL, *dst = NULL;
 	int ret = -EINVAL;
 
 	pr_debug("call %s()\n", __FUNCTION__);
@@ -765,8 +770,11 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 	if (entry) {
 		BUG_ON(entry->src == NULL);
 		BUG_ON(entry->src->page == NULL);
+		BUG_ON(data == NULL);
 		src = kmap_atomic(entry->src->page);
-		memcpy(data, src, PAGE_SIZE);
+		dst = kmap_atomic((struct page *)data);
+		memcpy(dst, src, PAGE_SIZE);
+		kunmap_atomic(dst);
 		kunmap_atomic(src);
 	} else {
 		goto out;
@@ -781,9 +789,11 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 			head_ycache_entry =
 			    llist_entry(entry->list.head.first,
 					struct ycache_entry, list.node);
+			BUG_ON(head_ycache_entry == NULL);
 			next = head_ycache_entry->list.node.next;
 			init_llist_head(&head_ycache_entry->list.head);
 			head_ycache_entry->list.head.first = next;
+			head_ycache_entry->unique = 1;
 			entry->src->entry = head_ycache_entry;
 		}
 	} else {
@@ -842,9 +852,11 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 			head_ycache_entry =
 			    llist_entry(ycache_entry->list.head.first,
 					struct ycache_entry, list.node);
+			BUG_ON(head_ycache_entry == NULL);
 			next = head_ycache_entry->list.node.next;
 			init_llist_head(&head_ycache_entry->list.head);
 			head_ycache_entry->list.head.first = next;
+			head_ycache_entry->unique = 1;
 			ycache_entry->src->entry = head_ycache_entry;
 		}
 	} else {
@@ -1172,6 +1184,7 @@ static struct cleancache_ops ycache_cleancache_ops = {
  */
 struct cleancache_ops *ycache_cleancache_register_ops(void)
 {
+	pr_debug("call %s()\n", __FUNCTION__);
 	return cleancache_register_ops(&ycache_cleancache_ops);
 }
 
@@ -1207,6 +1220,7 @@ static int ycache_frontswap_store(unsigned type, pgoff_t offset,
 	struct tmem_oid oid = oswiz(type, ind);
 	int ret = -1;
 
+	pr_debug("call %s()\n", __FUNCTION__);
 	BUG_ON(!PageLocked(page));
 	if (likely(ind64 == ind))
 		ret = ycache_put_page(ycache_frontswap_poolid, &oid, iswiz(ind),
@@ -1225,6 +1239,7 @@ static int ycache_frontswap_load(unsigned type, pgoff_t offset,
 	struct tmem_oid oid = oswiz(type, ind);
 	int ret = -1;
 
+	pr_debug("call %s()\n", __FUNCTION__);
 	BUG_ON(!PageLocked(page));
 	if (likely(ind64 == ind))
 		ret = ycache_get_page(ycache_frontswap_poolid, &oid, iswiz(ind),
@@ -1239,6 +1254,7 @@ static void ycache_frontswap_flush_page(unsigned type, pgoff_t offset)
 	u32 ind = (u32)offset;
 	struct tmem_oid oid = oswiz(type, ind);
 
+	pr_debug("call %s()\n", __FUNCTION__);
 	if (likely(ind64 == ind))
 		(void)ycache_flush_page(ycache_frontswap_poolid, &oid,
 					iswiz(ind));
@@ -1250,6 +1266,7 @@ static void ycache_frontswap_flush_area(unsigned type)
 	struct tmem_oid oid;
 	int ind;
 
+	pr_debug("call %s()\n", __FUNCTION__);
 	for (ind = SWIZ_MASK; ind >= 0; ind--) {
 		oid = oswiz(type, ind);
 		(void)ycache_flush_inode(ycache_frontswap_poolid, &oid);
@@ -1258,6 +1275,7 @@ static void ycache_frontswap_flush_area(unsigned type)
 
 static void ycache_frontswap_init(unsigned ignored)
 {
+	pr_debug("call %s()\n", __FUNCTION__);
 	/* a single tmem poolid is used for all frontswap "types" (swapfiles) */
 	if (ycache_frontswap_poolid < 0)
 		ycache_frontswap_poolid = ycache_new_pool(TMEM_POOL_PERSIST);
@@ -1275,6 +1293,7 @@ struct frontswap_ops *ycache_frontswap_register_ops(void)
 	struct frontswap_ops *old_ops =
 	    frontswap_register_ops(&ycache_frontswap_ops);
 
+	pr_debug("call %s()\n", __FUNCTION__);
 	return old_ops;
 }
 #endif
