@@ -795,6 +795,7 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 			head_ycache_entry->list.head.first = next;
 			head_ycache_entry->unique = 1;
 			entry->src->entry = head_ycache_entry;
+			atomic_dec(&ycache_duplicate_pages);
 		}
 	} else {
 		head_ycache_entry = entry->src->entry;
@@ -811,6 +812,7 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 				next = next->next;
 			next->next = next->next->next;
 		}
+		atomic_dec(&ycache_duplicate_pages);
 	}
 	ycache_entry_cache_free(entry);
 
@@ -858,6 +860,7 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 			head_ycache_entry->list.head.first = next;
 			head_ycache_entry->unique = 1;
 			ycache_entry->src->entry = head_ycache_entry;
+			atomic_dec(&ycache_duplicate_pages);
 		}
 	} else {
 		head_ycache_entry = ycache_entry->src->entry;
@@ -874,6 +877,7 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 				next = next->next;
 			next->next = next->next->next;
 		}
+		atomic_dec(&ycache_duplicate_pages);
 	}
 	ycache_entry_cache_free(ycache_entry);
 	spin_unlock(&ycache_host.lock);
