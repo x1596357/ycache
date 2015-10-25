@@ -35,6 +35,7 @@
 #include <linux/scatterlist.h>
 #include <linux/err.h>
 #include <linux/idr.h>
+#include <linux/version.h>
 #include "tmem.h"
 
 #ifdef CONFIG_CLEANCACHE
@@ -1294,9 +1295,14 @@ static struct frontswap_ops ycache_frontswap_ops = {
 
 struct frontswap_ops *ycache_frontswap_register_ops(void)
 {
-	struct frontswap_ops *old_ops =
-	    frontswap_register_ops(&ycache_frontswap_ops);
+	struct frontswap_ops *old_ops = NULL;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,2,0)
+	/* the frontswap register API is different in kernel version 4.2 */
+	frontswap_register_ops(&ycache_frontswap_ops);
+#else
+	old_ops =  frontswap_register_ops(&ycache_frontswap_ops);
+#endif
 	pr_debug("call %s()\n", __FUNCTION__);
 	return old_ops;
 }
