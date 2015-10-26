@@ -334,12 +334,10 @@ out:
  * list -
  * 		node - when being deduplicated, the ycache_entry is added
  * to
- * 		 	   an deduplicated-page list for future
- * reference
+ * 		 	   an deduplicated-page list for future reference
  * 		head - when being unique, the ycache_entry contains the
  *   		   deduplicated-page list head, where deduplicated page
- * could
- *   		   be added to
+ *        	   could be added to
  */
 struct ycache_entry {
 	struct page_entry *src;
@@ -347,7 +345,6 @@ struct ycache_entry {
 		struct llist_head head;
 		struct llist_node node;
 	} list;
-	bool unique;
 };
 
 /*********************************
@@ -672,20 +669,16 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 			page_entry_cache_free(page_entry);
 			ycache_entry_cache_free(ycache_entry);
 		} else {
-			/* set ycache_entry->entry */
+			/* set ycache_entry->src */
 			ycache_entry->src = page_entry;
-			/* set unique */
-			ycache_entry->unique = 1;
 			pampd = (void *)ycache_entry;
 		}
 		spin_unlock(&ycache_host.lock);
 	}
 	/* hash exists, compare bit by bit */
 	else if (likely(is_page_same(page_entry->page, page))) {
-		/* set ycache_entry->entry */
+		/* set ycache_entry->src */
 		ycache_entry->src = page_entry;
-		/* set deduplicated */
-		ycache_entry->unique = 0;
 		head_ycache_entry = page_entry->entry;
 		/* add new ycache_entry to deduplicated-entry list */
 		llist_add(&ycache_entry->list.node,
@@ -779,8 +772,9 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 		goto out;
 	}
 
-	if (entry->unique) {
-		if (llist_empty(&entry->list.head)) {
+	/* if entry->src->entry equals to this entry, this entry is unique */
+	if (entry->src->entry == entry) {
+		if (likely(llist_empty(&entry->list.head))) {
 			page_rb_erase(&page_tree->rbroot, entry->src);
 			page_free_entry(entry->src);
 		} else {
@@ -792,7 +786,6 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 			next = head_ycache_entry->list.node.next;
 			init_llist_head(&head_ycache_entry->list.head);
 			head_ycache_entry->list.head.first = next;
-			head_ycache_entry->unique = 1;
 			entry->src->entry = head_ycache_entry;
 			atomic_dec(&ycache_deduplicated_pages);
 		}
@@ -844,8 +837,11 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 
 	spin_lock(&ycache_host.lock);
 	ycache_entry = (struct ycache_entry *)pampd;
-	if (ycache_entry->unique) {
-		if (llist_empty(&ycache_entry->list.head)) {
+	/* if ycache_entry->src->entry equals ycache_entry, then this
+	   ycache_entry is unique
+	 */
+	if (ycache_entry->src->entry == ycache_entry) {
+		if (likely(llist_empty(&ycache_entry->list.head))) {
 			page_rb_erase(&page_tree->rbroot, ycache_entry->src);
 			page_free_entry(ycache_entry->src);
 		} else {
@@ -857,7 +853,6 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 			next = head_ycache_entry->list.node.next;
 			init_llist_head(&head_ycache_entry->list.head);
 			head_ycache_entry->list.head.first = next;
-			head_ycache_entry->unique = 1;
 			ycache_entry->src->entry = head_ycache_entry;
 			atomic_dec(&ycache_deduplicated_pages);
 		}
@@ -1382,7 +1377,7 @@ static void __exit ycache_debugfs_exit(void)
 
 static int __init ycache_init(void)
 {
-	pr_info("loading ycache\n");
+	pr_info("loading\n");
 	init_ycache_host();
 	tmem_register_hostops(&ycache_hostops);
 	tmem_register_pamops(&ycache_pamops);
@@ -1414,7 +1409,7 @@ static int __init ycache_init(void)
 	if (ycache_debugfs_init())
 		pr_warn("debugfs initialization failed\n");
 
-	pr_info("ycache loaded without errors \n");
+	pr_info("loaded without errors \n");
 	return 0;
 y_cachefail:
 	page_entry_cache_destroy();
@@ -1431,4 +1426,4 @@ late_initcall(ycache_init);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Eric Zhang <gd.yi@139.com>");
-MODULE_DESCRIPTION("Deduplicate pages evicted from page cache ");
+MODULE_DESCRIPTION("Deduplicate pages evicted from page cache and swap cache");
