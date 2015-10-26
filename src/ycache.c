@@ -621,11 +621,11 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 		page_entry = page_entry_cache_alloc(YCACHE_GFP_MASK);
 		BUG_ON(page_entry == NULL);
 
-		src = kmap(page);
-		dst = kmap(page_entry->page);
+		src = kmap_atomic(page);
+		dst = kmap_atomic(page_entry->page);
 		copy_page(dst, src);
-		kunmap(page_entry->page);
-		kunmap(page);
+		kunmap_atomic(dst);
+		kunmap_atomic(src);
 
 		/* set page_entry->entry */
 		page_entry->entry = ycache_entry;
