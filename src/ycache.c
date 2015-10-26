@@ -53,9 +53,9 @@
 * statistics
 **********************************/
 /* Total pages used for storage */
-static atomic_t ycache_total_pages = ATOMIC_INIT(0);
+static atomic_t ycache_used_pages = ATOMIC_INIT(0);
 /* The number of pages deduplicated */
-static atomic_t ycache_duplicate_pages = ATOMIC_INIT(0);
+static atomic_t ycache_deduplicated_pages = ATOMIC_INIT(0);
 
 /*
  * The statistics below are not protected from concurrent access for
@@ -146,9 +146,10 @@ static struct page_entry *page_entry_cache_alloc(gfp_t gfp)
 	entry = kmem_cache_alloc(page_entry_cache, gfp);
 	if (likely(entry != NULL)) {
 		/* alloc page*/
-		entry->page = alloc_page(gfp | __GFP_HIGHMEM | __GFP_FS);
+		entry->page = alloc_page(gfp | __GFP_HIGHMEM);
 		if (likely(entry->page != NULL)) {
 			RB_CLEAR_NODE(&entry->rbnode);
+			atomic_inc(&ycache_used_pages);
 			return entry;
 		} else {
 			page_entry_cache_free(entry);
@@ -251,7 +252,7 @@ static void page_free_entry(struct page_entry *entry)
 {
 	pr_debug("call %s()\n", __FUNCTION__);
 	page_entry_cache_free(entry);
-	atomic_dec(&ycache_total_pages);
+	atomic_dec(&ycache_used_pages);
 }
 
 /*
@@ -676,7 +677,6 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 			/* set unique */
 			ycache_entry->unique = 1;
 			pampd = (void *)ycache_entry;
-			atomic_inc(&ycache_total_pages);
 		}
 		spin_unlock(&ycache_host.lock);
 	}
@@ -693,7 +693,7 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 
 		spin_unlock(&ycache_host.lock);
 		pampd = (void *)ycache_entry;
-		atomic_inc(&ycache_duplicate_pages);
+		atomic_inc(&ycache_deduplicated_pages);
 	}
 	/* hash is the same but data is not */
 	else {
@@ -794,7 +794,7 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 			head_ycache_entry->list.head.first = next;
 			head_ycache_entry->unique = 1;
 			entry->src->entry = head_ycache_entry;
-			atomic_dec(&ycache_duplicate_pages);
+			atomic_dec(&ycache_deduplicated_pages);
 		}
 	} else {
 		head_ycache_entry = entry->src->entry;
@@ -811,7 +811,7 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 				next = next->next;
 			next->next = next->next->next;
 		}
-		atomic_dec(&ycache_duplicate_pages);
+		atomic_dec(&ycache_deduplicated_pages);
 	}
 	ycache_entry_cache_free(entry);
 
@@ -859,7 +859,7 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 			head_ycache_entry->list.head.first = next;
 			head_ycache_entry->unique = 1;
 			ycache_entry->src->entry = head_ycache_entry;
-			atomic_dec(&ycache_duplicate_pages);
+			atomic_dec(&ycache_deduplicated_pages);
 		}
 	} else {
 		head_ycache_entry = ycache_entry->src->entry;
@@ -876,7 +876,7 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 				next = next->next;
 			next->next = next->next->next;
 		}
-		atomic_dec(&ycache_duplicate_pages);
+		atomic_dec(&ycache_deduplicated_pages);
 	}
 	ycache_entry_cache_free(ycache_entry);
 	spin_unlock(&ycache_host.lock);
@@ -1316,10 +1316,11 @@ static int __init ycache_debugfs_init(void)
 	if (!ycache_debugfs_root)
 		return -ENOMEM;
 
-	debugfs_create_atomic_t("total_pages", S_IRUGO, ycache_debugfs_root,
-				&ycache_total_pages);
-	debugfs_create_atomic_t("duplicate_pages", S_IRUGO, ycache_debugfs_root,
-				&ycache_duplicate_pages);
+	debugfs_create_atomic_t("used_pages", S_IRUGO, ycache_debugfs_root,
+				&ycache_used_pages);
+	debugfs_create_atomic_t("deduplicated_pages", S_IRUGO,
+				ycache_debugfs_root,
+				&ycache_deduplicated_pages);
 	debugfs_create_u64("yentry_kmemcache_fail", S_IRUGO,
 			   ycache_debugfs_root, &ycache_yentry_kmemcache_fail);
 	debugfs_create_u64("pentry_kmemcache_fail", S_IRUGO,
