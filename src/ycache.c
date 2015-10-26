@@ -655,7 +655,7 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 
 		src = kmap(page);
 		dst = kmap(page_entry->page);
-		memcpy(dst, src, PAGE_SIZE);
+		copy_page(dst, src);
 		kunmap(page_entry->page);
 		kunmap(page);
 
@@ -739,7 +739,7 @@ static int ycache_pampd_get_data(char *data, size_t *bufsize, bool raw,
 		BUG_ON(data == NULL);
 		src = kmap_atomic(entry->src->page);
 		dst = kmap_atomic((struct page *)data);
-		memcpy(dst, src, PAGE_SIZE);
+		copy_page(dst, src);
 		kunmap_atomic(dst);
 		kunmap_atomic(src);
 	} else {
@@ -774,7 +774,7 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 		BUG_ON(data == NULL);
 		src = kmap_atomic(entry->src->page);
 		dst = kmap_atomic((struct page *)data);
-		memcpy(dst, src, PAGE_SIZE);
+		copy_page(dst, src);
 		kunmap_atomic(dst);
 		kunmap_atomic(src);
 	} else {
@@ -1187,10 +1187,10 @@ static struct cleancache_ops ycache_cleancache_ops = {
  * On Linux 4.1, cleancache_register_ops return int instead of
  * pointer to cleancache_ops
  */
-struct cleancache_ops *ycache_cleancache_register_ops(void)
+static inline __init void ycache_cleancache_register_ops(void)
 {
 	pr_debug("call %s()\n", __FUNCTION__);
-	return cleancache_register_ops(&ycache_cleancache_ops);
+	cleancache_register_ops(&ycache_cleancache_ops);
 }
 
 #endif
@@ -1293,18 +1293,10 @@ static struct frontswap_ops ycache_frontswap_ops = {
     .invalidate_area = ycache_frontswap_flush_area,
     .init = ycache_frontswap_init};
 
-struct frontswap_ops *ycache_frontswap_register_ops(void)
+static inline __init void ycache_frontswap_register_ops(void)
 {
-	struct frontswap_ops *old_ops = NULL;
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,2,0)
-	/* the frontswap register API is different in kernel version 4.2 */
-	frontswap_register_ops(&ycache_frontswap_ops);
-#else
-	old_ops =  frontswap_register_ops(&ycache_frontswap_ops);
-#endif
 	pr_debug("call %s()\n", __FUNCTION__);
-	return old_ops;
+	frontswap_register_ops(&ycache_frontswap_ops);
 }
 #endif
 
@@ -1391,13 +1383,6 @@ static void __exit ycache_debugfs_exit(void)
 
 static int __init ycache_init(void)
 {
-#ifdef CONFIG_CLEANCACHE
-	struct cleancache_ops *old_cleancache_ops;
-#endif
-#ifdef CONFIG_FRONTSWAP
-	struct frontswap_ops *old_frontswap_ops;
-#endif
-
 	pr_info("loading ycache\n");
 	init_ycache_host();
 	tmem_register_hostops(&ycache_hostops);
@@ -1420,16 +1405,12 @@ static int __init ycache_init(void)
 	}
 
 #ifdef CONFIG_CLEANCACHE
-	old_cleancache_ops = ycache_cleancache_register_ops();
+	ycache_cleancache_register_ops();
 	pr_info("cleancache enabled using kernel transcendent memory\n");
-	if (old_cleancache_ops && old_cleancache_ops->init_fs != NULL)
-		pr_warning("cleancache_ops overridden");
 #endif
 #ifdef CONFIG_FRONTSWAP
-	old_frontswap_ops = ycache_frontswap_register_ops();
+	ycache_frontswap_register_ops();
 	pr_info("frontswap enabled using kernel transcendent memory\n");
-	if (old_frontswap_ops && old_frontswap_ops->init != NULL)
-		pr_warning("frontswap_ops overridden\n");
 #endif
 	if (ycache_debugfs_init())
 		pr_warn("debugfs initialization failed\n");
