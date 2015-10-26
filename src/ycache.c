@@ -45,9 +45,8 @@
 #include <linux/frontswap.h>
 #endif
 
-/*#define YCACHE_GFP_MASK \
-	(__GFP_FS | __GFP_NORETRY | __GFP_NOWARN | __GFP_NOMEMALLOC)*/
-#define YCACHE_GFP_MASK GFP_KERNEL
+#define YCACHE_GFP_MASK                                                        \
+	(__GFP_FS | __GFP_NORETRY | __GFP_NOWARN | __GFP_NOMEMALLOC)
 
 /*********************************
 * statistics
@@ -178,24 +177,17 @@ static struct page_entry *page_rb_search(struct rb_root *root, u8 *hash)
 {
 	struct rb_node *node = root->rb_node;
 	struct page_entry *entry;
-	int i;
+	int result;
 
 	pr_debug("call %s()\n", __FUNCTION__);
 	while (node) {
 		entry = rb_entry(node, struct page_entry, rbnode);
-		i = 0;
-		while (i < MD5_DIGEST_SIZE) {
-			if (entry->hash[i] > hash[i]) {
-				node = node->rb_left;
-				break;
-			} else if (entry->hash[i] < hash[i]) {
-				node = node->rb_right;
-				break;
-			} else
-				i++;
-		}
-
-		if (i == MD5_DIGEST_SIZE)
+		result = memcmp(entry->hash, hash, MD5_DIGEST_SIZE);
+		if (result > 0)
+			node = node->rb_left;
+		else if (result < 0)
+			node = node->rb_right;
+		else
 			return entry;
 	}
 	return NULL;
@@ -211,25 +203,18 @@ static int page_rb_insert(struct rb_root *root, struct page_entry *entry,
 {
 	struct rb_node **link = &root->rb_node, *parent = NULL;
 	struct page_entry *tmp_entry;
-	int i;
+	int result;
 
 	pr_debug("call %s()\n", __FUNCTION__);
 	while (*link) {
 		parent = *link;
 		tmp_entry = rb_entry(parent, struct page_entry, rbnode);
-		i = 0;
-		while (i < MD5_DIGEST_SIZE) {
-			if (tmp_entry->hash[i] > entry->hash[i]) {
-				link = &(*link)->rb_left;
-				break;
-			} else if (tmp_entry->hash[i] < entry->hash[i]) {
-				link = &(*link)->rb_right;
-				break;
-			} else
-				i++;
-		}
-
-		if (i == MD5_DIGEST_SIZE) {
+		result = memcmp(tmp_entry->hash, entry->hash, MD5_DIGEST_SIZE);
+		if (result > 0)
+			link = &(*link)->rb_left;
+		else if (result < 0)
+			link = &(*link)->rb_right;
+		else {
 			*dupentry = tmp_entry;
 			return -EEXIST;
 		}
@@ -256,22 +241,17 @@ static void page_free_entry(struct page_entry *entry)
 }
 
 /*
- * plaintext_to_md5 - caculate md5 message digest for a message
+ * page_to_md5 - caculate md5 message digest for a page
  *
  * @src:    The start virtual address of the message
  * @result: Somewhere used to store the md5 value, need 128 bit.
  *          (see include/crypto/md5.h - MD5_DIGEST_SIZE)
  *
- * The user of this function should manage the memory lifecycle of
- *result
- * by himself/herself. The length of the plaintext should not be
- * longer than PAGE_SIZE.
- *
  * Return:  0 if the caculation is successful, <0 if an error was
- *occurred
+ * 			occurred
  *
  */
-static int plaintext_to_md5(const void *src, u8 *result)
+static int page_to_md5(const void *src, u8 *result)
 {
 	struct hash_desc desc;
 	struct scatterlist sg;
@@ -310,22 +290,15 @@ out:
 static int is_page_same(struct page *p1, struct page *p2)
 {
 	u8 *src, *dst;
-	int i = 0;
-	int ret = 0;
+	int ret;
 
 	pr_debug("call %s()\n", __FUNCTION__);
 	src = kmap_atomic(p1);
 	dst = kmap_atomic(p2);
-	for (; i < PAGE_SIZE; i++)
-		if (likely(src[i] != dst[i]))
-			goto out;
-
-	ret = 1;
-	pr_debug("call %s(), found one duplicate page\n", __FUNCTION__);
-out:
+	ret = memcmp(src, dst, PAGE_SIZE);
 	kunmap_atomic(dst);
 	kunmap_atomic(src);
-	return ret;
+	return ret == 0;
 }
 
 /*
@@ -333,8 +306,7 @@ out:
  * src - pointer to the corresponding page_entry, where
  * list -
  * 		node - when being deduplicated, the ycache_entry is added
- * to
- * 		 	   an deduplicated-page list for future reference
+ *             to an deduplicated-page list for future reference
  * 		head - when being unique, the ycache_entry contains the
  *   		   deduplicated-page list head, where deduplicated page
  *        	   could be added to
@@ -631,7 +603,7 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 
 	page = (struct page *)data;
 	src = kmap(page);
-	plaintext_to_md5(src, hash);
+	page_to_md5(src, hash);
 	kunmap(page);
 
 	ycache_entry = ycache_entry_cache_alloc(YCACHE_GFP_MASK);
@@ -1274,7 +1246,7 @@ static void ycache_frontswap_flush_area(unsigned type)
 static void ycache_frontswap_init(unsigned ignored)
 {
 	pr_debug("call %s()\n", __FUNCTION__);
-	/* a single tmem poolid is used for all frontswap "types" (swapfiles) */
+	/* a single poolid is used for all frontswap "types" (swapfiles)*/
 	if (ycache_frontswap_poolid < 0)
 		ycache_frontswap_poolid = ycache_new_pool(TMEM_POOL_PERSIST);
 }
