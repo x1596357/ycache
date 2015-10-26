@@ -49,8 +49,6 @@
 	(__GFP_FS | __GFP_NORETRY | __GFP_NOWARN | __GFP_NOMEMALLOC)*/
 #define YCACHE_GFP_MASK GFP_KERNEL
 
-#define LOCAL_CLIENT ((uint16_t)-1)
-
 /*********************************
 * statistics
 **********************************/
@@ -146,10 +144,10 @@ static struct page_entry *page_entry_cache_alloc(gfp_t gfp)
 
 	pr_debug("call %s()\n", __FUNCTION__);
 	entry = kmem_cache_alloc(page_entry_cache, gfp);
-	if (entry != NULL) {
+	if (likely(entry != NULL)) {
 		/* alloc page*/
 		entry->page = alloc_page(gfp | __GFP_HIGHMEM | __GFP_FS);
-		if (entry->page != NULL) {
+		if (likely(entry->page != NULL)) {
 			RB_CLEAR_NODE(&entry->rbnode);
 			return entry;
 		} else {
@@ -166,7 +164,7 @@ static struct page_entry *page_entry_cache_alloc(gfp_t gfp)
 static void page_entry_cache_free(struct page_entry *entry)
 {
 	pr_debug("call %s()\n", __FUNCTION__);
-	if (entry && entry->page != NULL) {
+	if (likely(entry && entry->page != NULL)) {
 		__free_page(entry->page);
 	}
 	kmem_cache_free(page_entry_cache, entry);
@@ -243,7 +241,7 @@ static int page_rb_insert(struct rb_root *root, struct page_entry *entry,
 static void page_rb_erase(struct rb_root *root, struct page_entry *entry)
 {
 	pr_debug("call %s()\n", __FUNCTION__);
-	if (!RB_EMPTY_NODE(&entry->rbnode)) {
+	if (likely(!RB_EMPTY_NODE(&entry->rbnode))) {
 		rb_erase(&entry->rbnode, root);
 		RB_CLEAR_NODE(&entry->rbnode);
 	}
@@ -283,27 +281,27 @@ static int plaintext_to_md5(const void *src, u8 *result)
 
 	desc.tfm = crypto_alloc_hash("md5", 0, CRYPTO_ALG_ASYNC);
 	/* fail to allocate a cipher handle */
-	if (IS_ERR(desc.tfm)) {
+	if (unlikely(IS_ERR(desc.tfm))) {
 		ret = -EINVAL;
 		goto out;
 	}
 	desc.flags = CRYPTO_TFM_REQ_MAY_SLEEP;
 
 	ret = crypto_hash_init(&desc);
-	if (ret)
+	if (unlikely(ret))
 		goto out;
 
 	ret = crypto_hash_update(&desc, &sg, PAGE_SIZE);
-	if (ret)
+	if (unlikely(ret))
 		goto out;
 
 	ret = crypto_hash_final(&desc, result);
-	if (ret)
+	if (unlikely(ret))
 		goto out;
 
 out:
 	crypto_free_hash(desc.tfm);
-	if (ret != 0)
+	if (unlikely(ret != 0))
 		ycache_md5_fail++;
 	return ret;
 }
@@ -318,7 +316,7 @@ static int is_page_same(struct page *p1, struct page *p2)
 	src = kmap_atomic(p1);
 	dst = kmap_atomic(p2);
 	for (; i < PAGE_SIZE; i++)
-		if (src[i] != dst[i])
+		if (likely(src[i] != dst[i]))
 			goto out;
 
 	ret = 1;
@@ -375,7 +373,7 @@ static struct ycache_entry *ycache_entry_cache_alloc(gfp_t gfp)
 
 	pr_debug("call %s()\n", __FUNCTION__);
 	entry = kmem_cache_alloc(ycache_entry_cache, gfp);
-	if (!entry) {
+	if (unlikely(!entry)) {
 		ycache_yentry_kmemcache_fail++;
 		return NULL;
 	}
@@ -401,7 +399,7 @@ struct ycache_client {
 
 static struct ycache_client ycache_host;
 
-static int init_ycache_host(void)
+static __init int init_ycache_host(void)
 {
 	pr_debug("call %s()\n", __FUNCTION__);
 	if (ycache_host.allocated)
@@ -412,7 +410,7 @@ static int init_ycache_host(void)
 		idr_init(&ycache_host.tmem_pools);
 		spin_lock_init(&ycache_host.lock);
 
-		if (page_tree == NULL) {
+		if (likely(page_tree == NULL)) {
 			page_tree =
 			    kmalloc(sizeof(struct page_tree), GFP_KERNEL);
 			if (!page_tree) {
@@ -428,7 +426,7 @@ static int init_ycache_host(void)
 
 /*
  * Tmem operations assume the pool_id implies the invoking client.
- * ycache only has one client (the kernel itself): LOCAL_CLIENT.
+ * ycache only has one client (the kernel itself).
  */
 static struct tmem_pool *ycache_get_pool_by_id(uint16_t pool_id)
 {
@@ -437,7 +435,7 @@ static struct tmem_pool *ycache_get_pool_by_id(uint16_t pool_id)
 	//	pr_debug("call %s()\n", __FUNCTION__);
 	atomic_inc(&ycache_host.refcount);
 	pool = idr_find(&ycache_host.tmem_pools, pool_id);
-	if (pool)
+	if (likely(pool))
 		atomic_inc(&pool->refcount);
 	return pool;
 }
@@ -445,7 +443,7 @@ static struct tmem_pool *ycache_get_pool_by_id(uint16_t pool_id)
 static void ycache_put_pool(struct tmem_pool *pool)
 {
 	//	pr_debug("call %s()\n", __FUNCTION__);
-	if (pool == NULL)
+	if (unlikely(pool == NULL))
 		BUG();
 	atomic_dec(&pool->refcount);
 	atomic_dec(&ycache_host.refcount);
@@ -639,7 +637,7 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 	kunmap(page);
 
 	ycache_entry = ycache_entry_cache_alloc(YCACHE_GFP_MASK);
-	if (ycache_entry == NULL) {
+	if (unlikely(ycache_entry == NULL)) {
 		BUG_ON(ycache_entry == NULL);
 		return NULL;
 	}
@@ -647,7 +645,7 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 	spin_lock(&ycache_host.lock);
 	page_entry = page_rb_search(&page_tree->rbroot, hash);
 	/* hash not exists */
-	if (page_entry == NULL) {
+	if (likely(page_entry == NULL)) {
 		spin_unlock(&ycache_host.lock);
 
 		page_entry = page_entry_cache_alloc(YCACHE_GFP_MASK);
@@ -683,7 +681,7 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 		spin_unlock(&ycache_host.lock);
 	}
 	/* hash exists, compare bit by bit */
-	else if (is_page_same(page_entry->page, page)) {
+	else if (likely(is_page_same(page_entry->page, page))) {
 		/* set ycache_entry->entry */
 		ycache_entry->src = page_entry;
 		/* set deduplicated */
@@ -704,7 +702,7 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 		spin_unlock(&ycache_host.lock);
 	}
 
-	if (pampd != NULL) {
+	if (likely(pampd != NULL)) {
 		if (eph) {
 			count = atomic_inc_return(&ycache_curr_eph_pampd_count);
 			if (count > ycache_curr_eph_pampd_count_max)
@@ -944,10 +942,10 @@ static int ycache_put_page(int pool_id, struct tmem_oid *oidp, uint32_t index,
 
 	// local_irq_save(flags);
 	preempt_disable();
-	if (ycache_do_preload(pool, page) == 0) {
+	if (likely(ycache_do_preload(pool, page) == 0)) {
 		ret = tmem_put(pool, oidp, index, (char *)(page), PAGE_SIZE, 0,
 			       is_ephemeral(pool));
-		if (ret < 0) {
+		if (unlikely(ret < 0)) {
 			if (is_ephemeral(pool))
 				ycache_failed_eph_puts++;
 			else
@@ -1037,7 +1035,7 @@ static int ycache_flush_fs(int pool_id)
 	int ret = -1;
 
 	pr_debug("call %s()\n", __FUNCTION__);
-	if (pool_id < 0)
+	if (unlikely(pool_id < 0))
 		goto out;
 
 	atomic_inc(&ycache_host.refcount);
@@ -1066,14 +1064,14 @@ static int ycache_new_pool(uint32_t flags)
 	pr_debug("call %s()\n", __FUNCTION__);
 
 	pool = kmalloc(sizeof(struct tmem_pool), GFP_KERNEL);
-	if (pool == NULL) {
+	if (unlikely(pool == NULL)) {
 		pr_info("pool creation failed: out of memory\n");
 		goto out;
 	}
 
 	pool_id = idr_alloc(&ycache_host.tmem_pools, pool, 1, 0, GFP_KERNEL);
 
-	if (pool_id < 0) {
+	if (unlikely(pool_id < 0)) {
 		pr_info("pool creation failed: error %d\n", pool_id);
 		kfree(pool);
 		goto out;
@@ -1150,7 +1148,7 @@ static void ycache_cleancache_flush_inode(int pool_id,
 static void ycache_cleancache_flush_fs(int pool_id)
 {
 	pr_debug("call %s()\n", __FUNCTION__);
-	if (pool_id >= 0)
+	if (likely(pool_id >= 0))
 		(void)ycache_flush_fs(pool_id);
 }
 
@@ -1387,19 +1385,19 @@ static int __init ycache_init(void)
 	init_ycache_host();
 	tmem_register_hostops(&ycache_hostops);
 	tmem_register_pamops(&ycache_pamops);
-	if (ycache_objnode_cache_create()) {
+	if (unlikely(ycache_objnode_cache_create())) {
 		pr_err("ycache_objnode_cache creation failed\n");
 		goto error;
 	}
-	if (ycache_obj_cache_create()) {
+	if (unlikely(ycache_obj_cache_create())) {
 		pr_err("ycache_obj_cache creation failed\n");
 		goto objfail;
 	}
-	if (page_entry_cache_create()) {
+	if (unlikely(page_entry_cache_create())) {
 		pr_err("page_entry_cache creation failed\n");
 		goto p_cachefail;
 	}
-	if (ycache_entry_cache_create()) {
+	if (unlikely(ycache_entry_cache_create())) {
 		pr_err("ycache_entry_cache creation failed\n");
 		goto y_cachefail;
 	}
