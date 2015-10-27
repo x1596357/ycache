@@ -47,6 +47,7 @@
 
 #define YCACHE_GFP_MASK                                                        \
 	(__GFP_FS | __GFP_NORETRY | __GFP_NOWARN | __GFP_NOMEMALLOC)
+#define MAX_PAGE_TREES 256
 
 /*********************************
 * statistics
@@ -98,7 +99,16 @@ struct page_tree {
 	struct rb_root rbroot;
 };
 
-struct page_tree *page_tree = NULL;
+static struct page_tree *page_trees;
+
+/* use MAX_PAGE_TREES page trees
+ * use hash[0] as index
+ */
+static inline struct page_tree *get_page_tree(struct page_tree *page_trees,
+					      u8 *hash)
+{
+	return &page_trees[hash[0]];
+}
 /*
  * struct page_entry
  *
@@ -134,7 +144,7 @@ static void __init page_entry_cache_destroy(void)
 	kmem_cache_destroy(page_entry_cache);
 }
 
-/* forward referece */
+/* forward reference */
 static void page_entry_cache_free(struct page_entry *);
 
 static struct page_entry *page_entry_cache_alloc(gfp_t gfp)
@@ -371,6 +381,8 @@ static struct ycache_client ycache_host;
 
 static __init int init_ycache_host(void)
 {
+	int i;
+
 	pr_debug("call %s()\n", __FUNCTION__);
 	if (ycache_host.allocated)
 		return 0;
@@ -380,15 +392,18 @@ static __init int init_ycache_host(void)
 		idr_init(&ycache_host.tmem_pools);
 		spin_lock_init(&ycache_host.lock);
 
-		if (likely(page_tree == NULL)) {
-			page_tree =
-			    kmalloc(sizeof(struct page_tree), GFP_KERNEL);
-			if (!page_tree) {
+		if (likely(page_trees == NULL)) {
+			page_trees =
+			    kmalloc(sizeof(struct page_tree) * MAX_PAGE_TREES,
+				    GFP_KERNEL);
+			if (unlikely(page_trees == NULL)) {
 				pr_err("page_tree allocatinon failed\n");
 				return -ENOMEM;
+			} else {
+				for (i = 0; i < MAX_PAGE_TREES; i++) {
+					page_trees[i].rbroot = RB_ROOT;
+				}
 			}
-
-			page_tree->rbroot = RB_ROOT;
 		}
 	}
 	return 0;
@@ -590,10 +605,11 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 {
 	void *pampd = NULL;
 	struct page *page;
-	struct ycache_entry *ycache_entry = NULL;
-	struct ycache_entry *head_ycache_entry = NULL;
+	struct ycache_entry *ycache_entry;
+	struct ycache_entry *head_ycache_entry;
 	struct page_entry *page_entry;
 	struct page_entry *dupentry = NULL;
+	struct page_tree *page_tree;
 	int result;
 	unsigned long count;
 	u8 hash[MD5_DIGEST_SIZE];
@@ -602,6 +618,7 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 	pr_debug("call %s()\n", __FUNCTION__);
 
 	page = (struct page *)data;
+	/* calculating MD5 may sleep, have to use kmap */
 	src = kmap(page);
 	page_to_md5(src, hash);
 	kunmap(page);
@@ -612,6 +629,7 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 		return NULL;
 	}
 
+	page_tree = get_page_tree(page_trees, hash);
 	spin_lock(&ycache_host.lock);
 	page_entry = page_rb_search(&page_tree->rbroot, hash);
 	/* hash not exists */
@@ -720,9 +738,10 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 					  struct tmem_oid *oid, uint32_t index)
 {
 	struct ycache_entry *entry = NULL;
-	struct ycache_entry *head_ycache_entry = NULL;
-	struct llist_node *next = NULL;
-	u8 *src = NULL, *dst = NULL;
+	struct ycache_entry *head_ycache_entry;
+	struct page_tree *page_tree;
+	struct llist_node *next;
+	u8 *src, *dst;
 	int ret = -EINVAL;
 
 	pr_debug("call %s()\n", __FUNCTION__);
@@ -747,6 +766,7 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 	/* if entry->src->entry equals to this entry, this entry is unique */
 	if (entry->src->entry == entry) {
 		if (likely(llist_empty(&entry->list.head))) {
+			page_tree = get_page_tree(page_trees, entry->src->hash);
 			page_rb_erase(&page_tree->rbroot, entry->src);
 			page_free_entry(entry->src);
 		} else {
@@ -803,6 +823,7 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 {
 	struct ycache_entry *ycache_entry;
 	struct ycache_entry *head_ycache_entry;
+	struct page_tree *page_tree;
 	struct llist_node *next;
 
 	pr_debug("call %s()\n", __FUNCTION__);
@@ -814,6 +835,8 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 	 */
 	if (ycache_entry->src->entry == ycache_entry) {
 		if (likely(llist_empty(&ycache_entry->list.head))) {
+			page_tree =
+			    get_page_tree(page_trees, ycache_entry->src->hash);
 			page_rb_erase(&page_tree->rbroot, ycache_entry->src);
 			page_free_entry(ycache_entry->src);
 		} else {
@@ -1350,7 +1373,10 @@ static void __exit ycache_debugfs_exit(void)
 static int __init ycache_init(void)
 {
 	pr_info("loading\n");
-	init_ycache_host();
+	if (unlikely(init_ycache_host())) {
+		pr_err("ycache host creation failed\n");
+		goto error;
+	}
 	tmem_register_hostops(&ycache_hostops);
 	tmem_register_pamops(&ycache_pamops);
 	if (unlikely(ycache_objnode_cache_create())) {
