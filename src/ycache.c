@@ -99,7 +99,7 @@ struct page_tree {
 	struct rb_root rbroot;
 };
 
-static struct page_tree *page_trees;
+static struct page_tree *page_trees = NULL;
 
 /* use MAX_PAGE_TREES page trees
  * use hash[0] as index
@@ -133,14 +133,14 @@ static struct kmem_cache *page_entry_cache;
 
 static int __init page_entry_cache_create(void)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	page_entry_cache = KMEM_CACHE(page_entry, 0);
 	return page_entry_cache == NULL;
 }
 
 static void __init page_entry_cache_destroy(void)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	kmem_cache_destroy(page_entry_cache);
 }
 
@@ -151,7 +151,7 @@ static struct page_entry *page_entry_cache_alloc(gfp_t gfp)
 {
 	struct page_entry *entry;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	entry = kmem_cache_alloc(page_entry_cache, gfp);
 	if (likely(entry != NULL)) {
 		/* alloc page*/
@@ -173,7 +173,7 @@ static struct page_entry *page_entry_cache_alloc(gfp_t gfp)
 
 static void page_entry_cache_free(struct page_entry *entry)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	if (likely(entry && entry->page != NULL)) {
 		__free_page(entry->page);
 	}
@@ -189,7 +189,7 @@ static struct page_entry *page_rb_search(struct rb_root *root, u8 *hash)
 	struct page_entry *entry;
 	int result;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	while (node) {
 		entry = rb_entry(node, struct page_entry, rbnode);
 		result = memcmp(entry->hash, hash, MD5_DIGEST_SIZE);
@@ -215,7 +215,7 @@ static int page_rb_insert(struct rb_root *root, struct page_entry *entry,
 	struct page_entry *tmp_entry;
 	int result;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	while (*link) {
 		parent = *link;
 		tmp_entry = rb_entry(parent, struct page_entry, rbnode);
@@ -236,7 +236,7 @@ static int page_rb_insert(struct rb_root *root, struct page_entry *entry,
 
 static void page_rb_erase(struct rb_root *root, struct page_entry *entry)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	if (likely(!RB_EMPTY_NODE(&entry->rbnode))) {
 		rb_erase(&entry->rbnode, root);
 		RB_CLEAR_NODE(&entry->rbnode);
@@ -245,7 +245,7 @@ static void page_rb_erase(struct rb_root *root, struct page_entry *entry)
 
 static void page_free_entry(struct page_entry *entry)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	page_entry_cache_free(entry);
 	atomic_dec(&ycache_used_pages);
 }
@@ -267,7 +267,7 @@ static int page_to_md5(const void *src, u8 *result)
 	struct scatterlist sg;
 	int ret = 0;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	sg_init_one(&sg, (u8 *)src, PAGE_SIZE);
 
 	desc.tfm = crypto_alloc_hash("md5", 0, CRYPTO_ALG_ASYNC);
@@ -302,7 +302,7 @@ static int is_page_same(struct page *p1, struct page *p2)
 	u8 *src, *dst;
 	int ret;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	src = kmap_atomic(p1);
 	dst = kmap_atomic(p2);
 	ret = memcmp(src, dst, PAGE_SIZE);
@@ -336,14 +336,14 @@ static struct kmem_cache *ycache_entry_cache;
 
 static int __init ycache_entry_cache_create(void)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	ycache_entry_cache = KMEM_CACHE(ycache_entry, 0);
 	return ycache_entry_cache == NULL;
 }
 
 static void __init ycache_entry_cache_destroy(void)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	kmem_cache_destroy(ycache_entry_cache);
 }
 
@@ -351,7 +351,7 @@ static struct ycache_entry *ycache_entry_cache_alloc(gfp_t gfp)
 {
 	struct ycache_entry *entry;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	entry = kmem_cache_alloc(ycache_entry_cache, gfp);
 	if (unlikely(!entry)) {
 		ycache_yentry_kmemcache_fail++;
@@ -363,7 +363,7 @@ static struct ycache_entry *ycache_entry_cache_alloc(gfp_t gfp)
 
 static void ycache_entry_cache_free(struct ycache_entry *entry)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	BUG_ON(entry == NULL);
 	kmem_cache_free(ycache_entry_cache, entry);
 }
@@ -383,7 +383,7 @@ static __init int init_ycache_host(void)
 {
 	int i;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	if (ycache_host.allocated)
 		return 0;
 	else {
@@ -417,7 +417,7 @@ static struct tmem_pool *ycache_get_pool_by_id(uint16_t pool_id)
 {
 	struct tmem_pool *pool = NULL;
 
-	//	pr_debug("call %s()\n", __FUNCTION__);
+	//	// pr_debug("call %s()\n", __FUNCTION__);
 	atomic_inc(&ycache_host.refcount);
 	pool = idr_find(&ycache_host.tmem_pools, pool_id);
 	if (likely(pool))
@@ -427,7 +427,7 @@ static struct tmem_pool *ycache_get_pool_by_id(uint16_t pool_id)
 
 static void ycache_put_pool(struct tmem_pool *pool)
 {
-	//	pr_debug("call %s()\n", __FUNCTION__);
+	//	// pr_debug("call %s()\n", __FUNCTION__);
 	if (unlikely(pool == NULL))
 		BUG();
 	atomic_dec(&pool->refcount);
@@ -448,7 +448,7 @@ static u64 ycache_curr_objnode_count_max;
 
 static int __init ycache_objnode_cache_create(void)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	ycache_objnode_cache = kmem_cache_create(
 	    "ycache_objnode", sizeof(struct tmem_objnode), 0, 0, NULL);
 	return ycache_objnode_cache == NULL;
@@ -456,13 +456,13 @@ static int __init ycache_objnode_cache_create(void)
 
 static void __init ycache_objnode_cache_destroy(void)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	kmem_cache_destroy(ycache_objnode_cache);
 }
 
 static int __init ycache_obj_cache_create(void)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	ycache_obj_cache = kmem_cache_create(
 	    "ycache_obj", sizeof(struct tmem_obj), 0, 0, NULL);
 	return ycache_obj_cache == NULL;
@@ -470,7 +470,7 @@ static int __init ycache_obj_cache_create(void)
 
 static void __init ycache_obj_cache_destroy(void)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	kmem_cache_destroy(ycache_obj_cache);
 }
 
@@ -496,13 +496,12 @@ static int ycache_do_preload(struct tmem_pool *pool, struct page *page)
 	struct tmem_objnode *objnode;
 	int ret = -ENOMEM;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	if (unlikely(ycache_objnode_cache == NULL))
 		goto out;
 	if (unlikely(ycache_obj_cache == NULL))
 		goto out;
 
-	/* IRQ has already been disabled. */
 	kp = this_cpu_ptr(&ycache_preloads);
 
 	if (!kp->obj) {
@@ -539,7 +538,7 @@ static struct tmem_objnode *ycache_objnode_alloc(struct tmem_pool *pool)
 	unsigned long count;
 	struct ycache_preload *kp;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	kp = this_cpu_ptr(&ycache_preloads);
 	if (kp->nr <= 0)
 		goto out;
@@ -557,7 +556,7 @@ out:
 static void ycache_objnode_free(struct tmem_objnode *objnode,
 				struct tmem_pool *pool)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	atomic_dec(&ycache_curr_objnode_count);
 	BUG_ON(atomic_read(&ycache_curr_objnode_count) < 0);
 	kmem_cache_free(ycache_objnode_cache, objnode);
@@ -569,7 +568,7 @@ static struct tmem_obj *ycache_obj_alloc(struct tmem_pool *pool)
 	unsigned long count;
 	struct ycache_preload *kp;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	kp = this_cpu_ptr(&ycache_preloads);
 	obj = kp->obj;
 	BUG_ON(obj == NULL);
@@ -582,7 +581,7 @@ static struct tmem_obj *ycache_obj_alloc(struct tmem_pool *pool)
 
 static void ycache_obj_free(struct tmem_obj *obj, struct tmem_pool *pool)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	atomic_dec(&ycache_curr_obj_count);
 	BUG_ON(atomic_read(&ycache_curr_obj_count) < 0);
 	kmem_cache_free(ycache_obj_cache, obj);
@@ -615,7 +614,7 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 	u8 hash[MD5_DIGEST_SIZE];
 	u8 *src, *dst;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 
 	page = (struct page *)data;
 	/* calculating MD5 may sleep, have to use kmap */
@@ -709,7 +708,7 @@ static int ycache_pampd_get_data(char *data, size_t *bufsize, bool raw,
 	u8 *src = NULL, *dst = NULL;
 	int ret = -EINVAL;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	BUG_ON(is_ephemeral(pool));
 	BUG_ON(pampd == NULL);
 	spin_lock(&ycache_host.lock);
@@ -744,7 +743,7 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 	u8 *src, *dst;
 	int ret = -EINVAL;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	BUG_ON(!is_ephemeral(pool));
 	BUG_ON(pampd == NULL);
 
@@ -826,7 +825,7 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 	struct page_tree *page_tree;
 	struct llist_node *next;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 
 	spin_lock(&ycache_host.lock);
 	ycache_entry = (struct ycache_entry *)pampd;
@@ -882,24 +881,24 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 
 static void ycache_pampd_free_obj(struct tmem_pool *pool, struct tmem_obj *obj)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 }
 
 static void ycache_pampd_new_obj(struct tmem_obj *obj)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 }
 
 static int ycache_pampd_replace_in_obj(void *pampd, struct tmem_obj *obj)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	return -1;
 }
 
 /* now the page will always be stored at local host */
 static bool ycache_pampd_is_remote(void *pampd)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	return 0;
 }
 
@@ -925,7 +924,7 @@ static int ycache_put_page(int pool_id, struct tmem_oid *oidp, uint32_t index,
 	int ret = -1;
 	// unsigned long flags;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	pool = ycache_get_pool_by_id(pool_id);
 	if (unlikely(pool == NULL))
 		goto out;
@@ -963,7 +962,7 @@ static int ycache_get_page(int pool_id, struct tmem_oid *oidp, uint32_t index,
 	// unsigned long flags;
 	size_t size = PAGE_SIZE;
 
-	//	pr_debug("call %s()\n", __FUNCTION__);
+	//	// pr_debug("call %s()\n", __FUNCTION__);
 	// local_irq_save(flags);
 	pool = ycache_get_pool_by_id(pool_id);
 	if (likely(pool != NULL)) {
@@ -982,7 +981,7 @@ static int ycache_flush_page(int pool_id, struct tmem_oid *oidp, uint32_t index)
 	int ret = -1;
 	// unsigned long flags;
 
-	//	pr_debug("call %s()\n", __FUNCTION__);
+	//	// pr_debug("call %s()\n", __FUNCTION__);
 	ycache_flush_total++;
 	// local_irq_save(flags);
 	pool = ycache_get_pool_by_id(pool_id);
@@ -1003,7 +1002,7 @@ static int ycache_flush_inode(int pool_id, struct tmem_oid *oidp)
 	int ret = -1;
 	// unsigned long flags;
 
-	//	pr_debug("call %s()\n", __FUNCTION__);
+	//	// pr_debug("call %s()\n", __FUNCTION__);
 
 	ycache_flobj_total++;
 	// local_irq_save(flags);
@@ -1024,7 +1023,7 @@ static int ycache_flush_fs(int pool_id)
 	struct tmem_pool *pool = NULL;
 	int ret = -1;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	if (unlikely(pool_id < 0))
 		goto out;
 
@@ -1051,7 +1050,7 @@ static int ycache_new_pool(uint32_t flags)
 	int pool_id = -1;
 	struct tmem_pool *pool;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 
 	pool = kmalloc(sizeof(struct tmem_pool), GFP_KERNEL);
 	if (unlikely(pool == NULL)) {
@@ -1095,7 +1094,7 @@ static void ycache_cleancache_put_page(int pool_id,
 	u32 tmp_index = (u32)index;
 	struct tmem_oid *oid = (struct tmem_oid *)&key;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	if (likely(tmp_index == index))
 		(void)ycache_put_page(pool_id, oid, index, page);
 }
@@ -1108,7 +1107,7 @@ static int ycache_cleancache_get_page(int pool_id,
 	struct tmem_oid *oid = (struct tmem_oid *)&key;
 	int ret = -1;
 
-	//	pr_debug("call %s()\n", __FUNCTION__);
+	//	// pr_debug("call %s()\n", __FUNCTION__);
 	if (likely(tmp_index == index))
 		ret = ycache_get_page(pool_id, oid, index, page);
 	return ret;
@@ -1121,7 +1120,7 @@ static void ycache_cleancache_flush_page(int pool_id,
 	u32 tmp_index = (u32)index;
 	struct tmem_oid *oid = (struct tmem_oid *)&key;
 
-	//	pr_debug("call %s()\n", __FUNCTION__);
+	//	// pr_debug("call %s()\n", __FUNCTION__);
 	if (likely(tmp_index == index))
 		(void)ycache_flush_page(pool_id, oid, tmp_index);
 }
@@ -1131,13 +1130,13 @@ static void ycache_cleancache_flush_inode(int pool_id,
 {
 	struct tmem_oid *oid = (struct tmem_oid *)&key;
 
-	//	pr_debug("call %s()\n", __FUNCTION__);
+	//	// pr_debug("call %s()\n", __FUNCTION__);
 	(void)ycache_flush_inode(pool_id, oid);
 }
 
 static void ycache_cleancache_flush_fs(int pool_id)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	if (likely(pool_id >= 0))
 		(void)ycache_flush_fs(pool_id);
 }
@@ -1147,7 +1146,7 @@ static int ycache_cleancache_init_fs(size_t pagesize)
 	BUG_ON(sizeof(struct cleancache_filekey) != sizeof(u64[3]));
 	BUG_ON(pagesize != PAGE_SIZE);
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 
 	return ycache_new_pool(0);
 }
@@ -1155,7 +1154,7 @@ static int ycache_cleancache_init_fs(size_t pagesize)
 /* Wait for implementation */
 static int ycache_cleancache_init_shared_fs(char *uuid, size_t pagesize)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	BUG_ON(sizeof(struct cleancache_filekey) != sizeof(u64[3]));
 	BUG_ON(pagesize != PAGE_SIZE);
 	/* not implemented, use init_fs instead */
@@ -1177,7 +1176,7 @@ static struct cleancache_ops ycache_cleancache_ops = {
  */
 static inline __init void ycache_cleancache_register_ops(void)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	cleancache_register_ops(&ycache_cleancache_ops);
 }
 
@@ -1213,7 +1212,7 @@ static int ycache_frontswap_store(unsigned type, pgoff_t offset,
 	struct tmem_oid oid = oswiz(type, ind);
 	int ret = -1;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	BUG_ON(!PageLocked(page));
 	if (likely(ind64 == ind))
 		ret = ycache_put_page(ycache_frontswap_poolid, &oid, iswiz(ind),
@@ -1232,7 +1231,7 @@ static int ycache_frontswap_load(unsigned type, pgoff_t offset,
 	struct tmem_oid oid = oswiz(type, ind);
 	int ret = -1;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	BUG_ON(!PageLocked(page));
 	if (likely(ind64 == ind))
 		ret = ycache_get_page(ycache_frontswap_poolid, &oid, iswiz(ind),
@@ -1247,7 +1246,7 @@ static void ycache_frontswap_flush_page(unsigned type, pgoff_t offset)
 	u32 ind = (u32)offset;
 	struct tmem_oid oid = oswiz(type, ind);
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	if (likely(ind64 == ind))
 		(void)ycache_flush_page(ycache_frontswap_poolid, &oid,
 					iswiz(ind));
@@ -1259,7 +1258,7 @@ static void ycache_frontswap_flush_area(unsigned type)
 	struct tmem_oid oid;
 	int ind;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	for (ind = SWIZ_MASK; ind >= 0; ind--) {
 		oid = oswiz(type, ind);
 		(void)ycache_flush_inode(ycache_frontswap_poolid, &oid);
@@ -1268,7 +1267,7 @@ static void ycache_frontswap_flush_area(unsigned type)
 
 static void ycache_frontswap_init(unsigned ignored)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	/* a single poolid is used for all frontswap "types" (swapfiles)*/
 	if (ycache_frontswap_poolid < 0)
 		ycache_frontswap_poolid = ycache_new_pool(TMEM_POOL_PERSIST);
@@ -1283,7 +1282,7 @@ static struct frontswap_ops ycache_frontswap_ops = {
 
 static inline __init void ycache_frontswap_register_ops(void)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	frontswap_register_ops(&ycache_frontswap_ops);
 }
 #endif
@@ -1298,7 +1297,7 @@ static struct dentry *ycache_debugfs_root;
 
 static int __init ycache_debugfs_init(void)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	if (!debugfs_initialized())
 		return -ENODEV;
 
@@ -1350,19 +1349,19 @@ static int __init ycache_debugfs_init(void)
 
 static void __exit ycache_debugfs_exit(void)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	debugfs_remove_recursive(ycache_debugfs_root);
 }
 #else
 static int __init ycache_debugfs_init(void)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	return 0;
 }
 
 static void __exit ycache_debugfs_exit(void)
 {
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 }
 #endif
 
