@@ -357,7 +357,6 @@ static struct ycache_entry *ycache_entry_cache_alloc(gfp_t gfp)
 		ycache_yentry_kmemcache_fail++;
 		return NULL;
 	}
-	init_llist_head(&entry->list.head);
 	return entry;
 }
 
@@ -658,8 +657,9 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 			page_entry_cache_free(page_entry);
 			ycache_entry_cache_free(ycache_entry);
 		} else {
-			/* set ycache_entry->src */
+			/* set ycache_entry->src and list.head */
 			ycache_entry->src = page_entry;
+			init_llist_head(&ycache_entry->list.head);
 			pampd = (void *)ycache_entry;
 		}
 		spin_unlock(&ycache_host.lock);
