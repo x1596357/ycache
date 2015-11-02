@@ -46,7 +46,7 @@
 
 #define YCACHE_GFP_MASK                                                        \
 	(__GFP_FS | __GFP_NORETRY | __GFP_NOWARN | __GFP_NOMEMALLOC)
-#define MAX_YCACHE_TREES 256
+#define MAX_YCACHE_TREES 1024
 
 /* Total pages used for storage */
 static atomic_t ycache_used_pages = ATOMIC_INIT(0);
@@ -103,8 +103,12 @@ struct ycache_tree {
 	spinlock_t lock;
 };
 
-static struct ycache_tree *ycache_trees[MAX_YCACHE_TREES] = {0};
+static struct ycache_tree ycache_trees[MAX_YCACHE_TREES];
 
+static inline struct ycache_tree *get_ycache_tree(uint32_t index)
+{
+	return &ycache_trees[index % MAX_YCACHE_TREES];
+}
 /*
  * struct ycache_entry
  *
@@ -351,12 +355,20 @@ static struct ycache_client *ycache_host = NULL;
 
 static __init int init_ycache_host(void)
 {
+	int i;
 	// pr_debug("call %s()\n", __FUNCTION__);
 	if (unlikely(ycache_host != NULL)) {
 		return 0;
 	} else {
-		ycache_host = kmalloc(sizeof(struct ycache_client), GFP_KERNEL);
+		ycache_host = (struct ycache_client *)kmalloc(
+		    sizeof(struct ycache_client), GFP_KERNEL);
+		if (ycache_host == NULL)
+			return -ENOMEM;
 		idr_init(&ycache_host->tmem_pools);
+		for (i = 0; i < MAX_YCACHE_TREES; i++) {
+			ycache_trees[i].rbroot = RB_ROOT;
+			spin_lock_init(&ycache_trees[i].lock);
+		}
 	}
 	return 0;
 }
@@ -554,7 +566,7 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 	page_to_md5(src, hash);
 	kunmap(page);
 
-	ycache_tree = ycache_trees[pool->pool_id];
+	ycache_tree = get_ycache_tree(index);
 	spin_lock(&ycache_tree->lock);
 	entry = ycache_entry_find_get(&ycache_tree->rbroot, hash);
 	/* hash not exists */
@@ -633,7 +645,7 @@ static int ycache_pampd_get_data(char *data, size_t *bufsize, bool raw,
 	BUG_ON(pampd == NULL);
 	BUG_ON(data == NULL);
 
-	ycache_tree = ycache_trees[pool->pool_id];
+	ycache_tree = get_ycache_tree(index);
 	spin_lock(&ycache_tree->lock);
 	entry = (struct ycache_entry *)pampd;
 	ycache_entry_get(entry);
@@ -669,7 +681,7 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 	BUG_ON(pampd == NULL);
 	BUG_ON(data == NULL);
 
-	ycache_tree = ycache_trees[pool->pool_id];
+	ycache_tree = get_ycache_tree(index);
 	spin_lock(&ycache_tree->lock);
 	entry = (struct ycache_entry *)pampd;
 	ycache_entry_get(entry);
@@ -711,7 +723,7 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 	struct ycache_tree *ycache_tree;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
-	ycache_tree = ycache_trees[pool->pool_id];
+	ycache_tree = get_ycache_tree(index);
 	spin_lock(&ycache_tree->lock);
 	entry = (struct ycache_entry *)pampd;
 	/* drop one reference upon creation or deduplication */
@@ -851,7 +863,7 @@ static int ycache_flush_inode(int pool_id, struct tmem_oid *oidp)
 	int ret = -1;
 	// unsigned long flags;
 
-	//	// pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 
 	ycache_flobj_total++;
 	// local_irq_save(flags);
@@ -905,25 +917,13 @@ static int ycache_new_pool(uint32_t flags)
 		goto out;
 	}
 
-	pool_id = idr_alloc(&ycache_host->tmem_pools, pool, 0, MAX_YCACHE_TREES,
-			    GFP_KERNEL);
+	pool_id = idr_alloc(&ycache_host->tmem_pools, pool, 0, 0, GFP_KERNEL);
 
 	if (unlikely(pool_id < 0)) {
 		pr_warn("pool creation failed: error %d\n", pool_id);
 		kfree(pool);
 		goto out;
 	}
-
-	ycache_trees[pool_id] = (struct ycache_tree *)kmalloc(
-	    sizeof(struct ycache_tree), GFP_KERNEL);
-	if (unlikely(ycache_trees[pool_id] == NULL)) {
-		pr_warn("ycache_tree creation failed\n");
-		kfree(pool);
-		goto out;
-	}
-
-	ycache_trees[pool_id]->rbroot = RB_ROOT;
-	spin_lock_init(&ycache_trees[pool_id]->lock);
 
 	atomic_set(&pool->refcount, 0);
 	pool->client = ycache_host;
