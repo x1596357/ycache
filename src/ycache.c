@@ -1144,6 +1144,36 @@ static inline __init void ycache_frontswap_register_ops(void)
 }
 #endif
 
+static int ycache_cpu_notifier(struct notifier_block *nb, unsigned long action,
+			       void *pcpu)
+{
+	int cpu = (long)pcpu;
+	struct ycache_preload *kp;
+
+	switch (action) {
+	case CPU_DEAD:
+	case CPU_UP_CANCELED:
+		kp = &per_cpu(ycache_preloads, cpu);
+		while (kp->nr) {
+			kmem_cache_free(ycache_objnode_cache,
+					kp->objnodes[kp->nr - 1]);
+			kp->objnodes[kp->nr - 1] = NULL;
+			kp->nr--;
+		}
+		if (kp->obj) {
+			kmem_cache_free(ycache_obj_cache, kp->obj);
+			kp->obj = NULL;
+		}
+		break;
+	default:
+		break;
+	}
+	return NOTIFY_OK;
+}
+
+static struct notifier_block ycache_cpu_notifier_block = {
+    .notifier_call = ycache_cpu_notifier};
+
 /*********************************
 * debugfs functions
 **********************************/
@@ -1234,6 +1264,10 @@ static int __init ycache_init(void)
 	}
 	tmem_register_hostops(&ycache_hostops);
 	tmem_register_pamops(&ycache_pamops);
+	if (unlikely(register_cpu_notifier(&ycache_cpu_notifier_block))) {
+		pr_err("can't register cpu notifier\n");
+		/* do nothing since we can still function without it*/
+	}
 	if (unlikely(ycache_objnode_cache_create())) {
 		pr_err("ycache_objnode_cache creation failed\n");
 		goto error;
