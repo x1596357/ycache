@@ -74,10 +74,6 @@ static u64 ycache_failed_puts;
 /* tmem statistics */
 static atomic_t ycache_curr_eph_pampd_count = ATOMIC_INIT(0);
 static unsigned long ycache_curr_eph_pampd_count_max;
-/* For now, used named slabs so can easily track usage; later can
- * either just use kmalloc, or perhaps add a slab-like allocator
- * to more carefully manage total memory utilization
- */
 static atomic_t ycache_curr_obj_count = ATOMIC_INIT(0);
 static u64 ycache_curr_obj_count_max;
 static atomic_t ycache_curr_objnode_count = ATOMIC_INIT(0);
@@ -665,11 +661,7 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 	BUG_ON(data == NULL);
 
 	ycache_tree = get_ycache_tree(index);
-	spin_lock(&ycache_tree->lock);
 	entry = (struct ycache_entry *)pampd;
-	ycache_entry_get(entry);
-	spin_unlock(&ycache_tree->lock);
-
 	src = kmap_atomic(entry->page);
 	dst = kmap_atomic((struct page *)data);
 	copy_page(dst, src);
@@ -677,8 +669,7 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 	kunmap_atomic(src);
 
 	spin_lock(&ycache_tree->lock);
-	/* drop local reference */
-	ycache_entry_put(ycache_tree, entry);
+	/* we ignored getting and dropping local reference */
 	/* drop one reference upon creation or deduplication */
 	ycache_entry_put(ycache_tree, entry);
 	spin_unlock(&ycache_tree->lock);
@@ -702,8 +693,8 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 
 	// pr_debug("call %s()\n", __FUNCTION__);
 	ycache_tree = get_ycache_tree(index);
-	spin_lock(&ycache_tree->lock);
 	entry = (struct ycache_entry *)pampd;
+	spin_lock(&ycache_tree->lock);
 	/* drop one reference upon creation or deduplication */
 	ycache_entry_put(ycache_tree, entry);
 	spin_unlock(&ycache_tree->lock);
@@ -748,8 +739,7 @@ static struct tmem_pamops ycache_pamops = {
 };
 
 /* These are "cleancache" which is used as a second-chance cache for clean
- * page cache pages; A generic "shim" is provided here to translate
- * in-kernel semantics to ycache semantics.
+ * page cache pages;
  */
 
 #ifdef CONFIG_CLEANCACHE
@@ -1015,11 +1005,11 @@ static int __init ycache_debugfs_init(void)
 			   &ycache_flobj_total);
 	debugfs_create_u64("flobj_found", S_IRUGO, ycache_debugfs_root,
 			   &ycache_flobj_found);
-	debugfs_create_u64("failed_eph_puts", S_IRUGO, ycache_debugfs_root,
+	debugfs_create_u64("failed_puts", S_IRUGO, ycache_debugfs_root,
 			   &ycache_failed_puts);
 	debugfs_create_u64("failed_get_free_pages", S_IRUGO,
 			   ycache_debugfs_root, &ycache_failed_get_free_pages);
-	debugfs_create_u64("ycache_failed_alloc", S_IRUGO, ycache_debugfs_root,
+	debugfs_create_u64("failed_alloc", S_IRUGO, ycache_debugfs_root,
 			   &ycache_failed_alloc);
 	debugfs_create_u64("put_to_flush", S_IRUGO, ycache_debugfs_root,
 			   &ycache_put_to_flush);
@@ -1107,4 +1097,4 @@ late_initcall(ycache_init);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Eric Zhang <gd.yi@139.com>");
-MODULE_DESCRIPTION("Deduplicate pages evicted from page cache and swap cache");
+MODULE_DESCRIPTION("Deduplicate pages evicted from page cache");
