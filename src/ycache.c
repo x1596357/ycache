@@ -40,9 +40,6 @@
 #ifdef CONFIG_CLEANCACHE
 #include <linux/cleancache.h>
 #endif
-#ifdef CONFIG_FRONTSWAP
-#include <linux/frontswap.h>
-#endif
 
 #define YCACHE_GFP_MASK                                                        \
 	(__GFP_FS | __GFP_NORETRY | __GFP_NOWARN | __GFP_NOMEMALLOC)
@@ -68,18 +65,15 @@ static u64 ycache_md5_collision;
 static u64 ycache_failed_get_free_pages;
 static u64 ycache_failed_alloc;
 static u64 ycache_put_to_flush;
-/* Useful stats not collected by cleancache or frontswap */
+/* Useful stats not collected by cleancache */
 static u64 ycache_flush_total;
 static u64 ycache_flush_found;
 static u64 ycache_flobj_total;
 static u64 ycache_flobj_found;
-static u64 ycache_failed_eph_puts;
-static u64 ycache_failed_pers_puts;
+static u64 ycache_failed_puts;
 /* tmem statistics */
 static atomic_t ycache_curr_eph_pampd_count = ATOMIC_INIT(0);
 static unsigned long ycache_curr_eph_pampd_count_max;
-static atomic_t ycache_curr_pers_pampd_count = ATOMIC_INIT(0);
-static unsigned long ycache_curr_pers_pampd_count_max;
 /* For now, used named slabs so can easily track usage; later can
  * either just use kmalloc, or perhaps add a slab-like allocator
  * to more carefully manage total memory utilization
@@ -304,27 +298,23 @@ static int page_to_md5(const void *src, u8 *result)
 
 	// pr_debug("call %s()\n", __FUNCTION__);
 	sg_init_one(&sg, (u8 *)src, PAGE_SIZE);
-
 	desc.tfm = crypto_alloc_hash("md5", 0, CRYPTO_ALG_ASYNC);
 	/* fail to allocate a cipher handle */
 	if (unlikely(IS_ERR(desc.tfm))) {
 		ret = -EINVAL;
 		goto out;
 	}
-	desc.flags = CRYPTO_TFM_REQ_MAY_SLEEP;
 
+	desc.flags = CRYPTO_TFM_REQ_MAY_SLEEP;
 	ret = crypto_hash_init(&desc);
 	if (unlikely(ret))
 		goto out;
-
 	ret = crypto_hash_update(&desc, &sg, PAGE_SIZE);
 	if (unlikely(ret))
 		goto out;
-
 	ret = crypto_hash_final(&desc, result);
 	if (unlikely(ret))
 		goto out;
-
 out:
 	crypto_free_hash(desc.tfm);
 	if (unlikely(ret != 0))
@@ -616,16 +606,9 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 	}
 
 	if (likely(pampd != NULL)) {
-		if (eph) {
-			count = atomic_inc_return(&ycache_curr_eph_pampd_count);
-			if (count > ycache_curr_eph_pampd_count_max)
-				ycache_curr_eph_pampd_count_max = count;
-		} else {
-			count =
-			    atomic_inc_return(&ycache_curr_pers_pampd_count);
-			if (count > ycache_curr_pers_pampd_count_max)
-				ycache_curr_pers_pampd_count_max = count;
-		}
+		count = atomic_inc_return(&ycache_curr_eph_pampd_count);
+		if (count > ycache_curr_eph_pampd_count_max)
+			ycache_curr_eph_pampd_count_max = count;
 	}
 reject:
 	return pampd;
@@ -641,7 +624,7 @@ static int ycache_pampd_get_data(char *data, size_t *bufsize, bool raw,
 	int ret = -EINVAL;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
-	BUG_ON(is_ephemeral(pool));
+	// BUG_ON(is_ephemeral(pool));
 	BUG_ON(pampd == NULL);
 	BUG_ON(data == NULL);
 
@@ -701,13 +684,8 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 	spin_unlock(&ycache_tree->lock);
 
 	atomic_dec(&ycache_total_pages);
-	if (is_ephemeral(pool)) {
-		atomic_dec(&ycache_curr_eph_pampd_count);
-		BUG_ON(atomic_read(&ycache_curr_eph_pampd_count) < 0);
-	} else {
-		atomic_dec(&ycache_curr_pers_pampd_count);
-		BUG_ON(atomic_read(&ycache_curr_pers_pampd_count) < 0);
-	}
+	atomic_dec(&ycache_curr_eph_pampd_count);
+	BUG_ON(atomic_read(&ycache_curr_eph_pampd_count) < 0);
 
 	return 0;
 }
@@ -731,13 +709,8 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 	spin_unlock(&ycache_tree->lock);
 
 	atomic_dec(&ycache_total_pages);
-	if (is_ephemeral(pool)) {
-		atomic_dec(&ycache_curr_eph_pampd_count);
-		BUG_ON(atomic_read(&ycache_curr_eph_pampd_count) < 0);
-	} else {
-		atomic_dec(&ycache_curr_pers_pampd_count);
-		BUG_ON(atomic_read(&ycache_curr_pers_pampd_count) < 0);
-	}
+	atomic_dec(&ycache_curr_eph_pampd_count);
+	BUG_ON(atomic_read(&ycache_curr_eph_pampd_count) < 0);
 }
 
 static void ycache_pampd_free_obj(struct tmem_pool *pool, struct tmem_obj *obj)
@@ -774,123 +747,137 @@ static struct tmem_pamops ycache_pamops = {
     .is_remote = ycache_pampd_is_remote,
 };
 
-/*
- * ycache shims between cleancache/frontswap ops
- * TO BE IMPLENMENT !!!
+/* These are "cleancache" which is used as a second-chance cache for clean
+ * page cache pages; A generic "shim" is provided here to translate
+ * in-kernel semantics to ycache semantics.
  */
-static int ycache_put_page(int pool_id, struct tmem_oid *oidp, uint32_t index,
-			   struct page *page)
+
+#ifdef CONFIG_CLEANCACHE
+static void ycache_cleancache_put_page(int pool_id,
+				       struct cleancache_filekey key,
+				       pgoff_t index, struct page *page)
 {
 	struct tmem_pool *pool;
+	struct tmem_oid *oid = (struct tmem_oid *)&key;
+	u32 tmp_index = (u32)index;
 	int ret = -1;
-	// unsigned long flags;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
+	if (unlikely(tmp_index != index))
+		return;
+
 	pool = ycache_get_pool_by_id(pool_id);
 	if (unlikely(pool == NULL))
-		goto out;
+		return;
 
 	// local_irq_save(flags);
 	preempt_disable();
 	if (likely(ycache_do_preload(pool, page) == 0)) {
-		ret = tmem_put(pool, oidp, index, (char *)(page), PAGE_SIZE, 0,
+		ret = tmem_put(pool, oid, index, (char *)(page), PAGE_SIZE, 0,
 			       is_ephemeral(pool));
 		if (unlikely(ret < 0)) {
-			if (is_ephemeral(pool))
-				ycache_failed_eph_puts++;
-			else
-				ycache_failed_pers_puts++;
+			ycache_failed_puts++;
 		}
 	} else {
 		ycache_put_to_flush++;
 		if (atomic_read(&pool->obj_count) > 0)
 			/* the put fails whether the flush succeeds or
 			 * not */
-			(void)tmem_flush_page(pool, oidp, index);
+			(void)tmem_flush_page(pool, oid, index);
 	}
 	preempt_enable();
 	// local_irq_restore(flags);
 	ycache_put_pool(pool);
-out:
-	return ret;
 }
 
-static int ycache_get_page(int pool_id, struct tmem_oid *oidp, uint32_t index,
-			   struct page *page)
+static int ycache_cleancache_get_page(int pool_id,
+				      struct cleancache_filekey key,
+				      pgoff_t index, struct page *page)
 {
 	struct tmem_pool *pool;
+	struct tmem_oid *oid = (struct tmem_oid *)&key;
+	u32 tmp_index = (u32)index;
+	size_t size = PAGE_SIZE;
 	int ret = -1;
 	// unsigned long flags;
-	size_t size = PAGE_SIZE;
 
-	//	// pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
+	if (unlikely(tmp_index != index))
+		goto out;
+
 	// local_irq_save(flags);
 	pool = ycache_get_pool_by_id(pool_id);
 	if (likely(pool != NULL)) {
 		if (atomic_read(&pool->obj_count) > 0)
-			ret = tmem_get(pool, oidp, index, (char *)(page), &size,
+			ret = tmem_get(pool, oid, index, (char *)(page), &size,
 				       0, is_ephemeral(pool));
 		ycache_put_pool(pool);
 	}
-	// local_irq_restore(flags);
+// local_irq_restore(flags);
+out:
 	return ret;
 }
 
-static int ycache_flush_page(int pool_id, struct tmem_oid *oidp, uint32_t index)
+static void ycache_cleancache_flush_page(int pool_id,
+					 struct cleancache_filekey key,
+					 pgoff_t index)
 {
 	struct tmem_pool *pool;
+	struct tmem_oid *oid = (struct tmem_oid *)&key;
+	u32 tmp_index = (u32)index;
 	int ret = -1;
 	// unsigned long flags;
 
-	//	// pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
+	if (unlikely(tmp_index != index))
+		return;
+
 	ycache_flush_total++;
 	// local_irq_save(flags);
 	pool = ycache_get_pool_by_id(pool_id);
 	if (likely(pool != NULL)) {
 		if (atomic_read(&pool->obj_count) > 0)
-			ret = tmem_flush_page(pool, oidp, index);
+			ret = tmem_flush_page(pool, oid, index);
 		ycache_put_pool(pool);
 	}
 	// local_irq_restore(flags);
 	if (ret >= 0)
 		ycache_flush_found++;
-	return ret;
 }
 
-static int ycache_flush_inode(int pool_id, struct tmem_oid *oidp)
+static void ycache_cleancache_flush_inode(int pool_id,
+					  struct cleancache_filekey key)
 {
 	struct tmem_pool *pool;
+	struct tmem_oid *oid = (struct tmem_oid *)&key;
 	int ret = -1;
 	// unsigned long flags;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
-
 	ycache_flobj_total++;
 	// local_irq_save(flags);
 	pool = ycache_get_pool_by_id(pool_id);
 	if (likely(pool != NULL)) {
 		if (atomic_read(&pool->obj_count) > 0)
-			ret = tmem_flush_object(pool, oidp);
+			ret = tmem_flush_object(pool, oid);
 		ycache_put_pool(pool);
 	}
 	// local_irq_restore(flags);
 	if (ret >= 0)
 		ycache_flobj_found++;
-	return ret;
 }
 
-static int ycache_flush_fs(int pool_id)
+static void ycache_cleancache_flush_fs(int pool_id)
 {
 	struct tmem_pool *pool = NULL;
 	int ret = -1;
-
 	// pr_debug("call %s()\n", __FUNCTION__);
 	if (unlikely(pool_id < 0))
-		goto out;
+		return;
 
 	pool = idr_find(&ycache_host->tmem_pools, pool_id);
 	if (pool == NULL)
-		goto out;
+		return;
 	idr_remove(&ycache_host->tmem_pools, pool_id);
 	/* wait for pool activity on other cpus to quiesce */
 	while (atomic_read(&pool->refcount) != 0)
@@ -900,16 +887,16 @@ static int ycache_flush_fs(int pool_id)
 	local_bh_enable();
 	kfree(pool);
 	pr_info("destroyed pool id=%d", pool_id);
-out:
-	return ret;
 }
 
-static int ycache_new_pool(uint32_t flags)
+static int ycache_cleancache_init_fs(size_t pagesize)
 {
-	int pool_id = -1;
 	struct tmem_pool *pool;
+	int pool_id = -1;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
+	BUG_ON(sizeof(struct cleancache_filekey) != sizeof(u64[3]));
+	BUG_ON(pagesize != PAGE_SIZE);
 
 	pool = kmalloc(sizeof(struct tmem_pool), GFP_KERNEL);
 	if (unlikely(pool == NULL)) {
@@ -928,84 +915,10 @@ static int ycache_new_pool(uint32_t flags)
 	atomic_set(&pool->refcount, 0);
 	pool->client = ycache_host;
 	pool->pool_id = pool_id;
-	tmem_new_pool(pool, flags);
-	pr_info("created %s tmem pool, pool_id=%d",
-		flags & TMEM_POOL_PERSIST ? "persistent" : "ephemeral",
-		pool_id);
+	tmem_new_pool(pool, 0);
+	pr_info("created ephemeral tmem pool, pool_id=%d", pool_id);
 out:
 	return pool_id;
-}
-
-/*
- * These are "cleancache" which is used as a second-chance cache for clean
- * page cache pages; and "frontswap" which is used for swap pages
- * to avoid writes to disk.  A generic "shim" is provided here for each
- * to translate in-kernel semantics to ycache semantics.
- */
-
-#ifdef CONFIG_CLEANCACHE
-static void ycache_cleancache_put_page(int pool_id,
-				       struct cleancache_filekey key,
-				       pgoff_t index, struct page *page)
-{
-	u32 tmp_index = (u32)index;
-	struct tmem_oid *oid = (struct tmem_oid *)&key;
-
-	// pr_debug("call %s()\n", __FUNCTION__);
-	if (likely(tmp_index == index))
-		(void)ycache_put_page(pool_id, oid, index, page);
-}
-
-static int ycache_cleancache_get_page(int pool_id,
-				      struct cleancache_filekey key,
-				      pgoff_t index, struct page *page)
-{
-	u32 tmp_index = (u32)index;
-	struct tmem_oid *oid = (struct tmem_oid *)&key;
-	int ret = -1;
-
-	//	// pr_debug("call %s()\n", __FUNCTION__);
-	if (likely(tmp_index == index))
-		ret = ycache_get_page(pool_id, oid, index, page);
-	return ret;
-}
-
-static void ycache_cleancache_flush_page(int pool_id,
-					 struct cleancache_filekey key,
-					 pgoff_t index)
-{
-	u32 tmp_index = (u32)index;
-	struct tmem_oid *oid = (struct tmem_oid *)&key;
-
-	// pr_debug("call %s()\n", __FUNCTION__);
-	if (likely(tmp_index == index))
-		(void)ycache_flush_page(pool_id, oid, tmp_index);
-}
-
-static void ycache_cleancache_flush_inode(int pool_id,
-					  struct cleancache_filekey key)
-{
-	struct tmem_oid *oid = (struct tmem_oid *)&key;
-
-	// pr_debug("call %s()\n", __FUNCTION__);
-	(void)ycache_flush_inode(pool_id, oid);
-}
-
-static void ycache_cleancache_flush_fs(int pool_id)
-{
-	// pr_debug("call %s()\n", __FUNCTION__);
-	if (likely(pool_id >= 0))
-		(void)ycache_flush_fs(pool_id);
-}
-
-static int ycache_cleancache_init_fs(size_t pagesize)
-{
-	BUG_ON(sizeof(struct cleancache_filekey) != sizeof(u64[3]));
-	BUG_ON(pagesize != PAGE_SIZE);
-
-	// pr_debug("call %s()\n", __FUNCTION__);
-
-	return ycache_new_pool(0);
 }
 
 /* Wait for implementation */
@@ -1027,121 +940,13 @@ static struct cleancache_ops ycache_cleancache_ops = {
     .invalidate_fs = ycache_cleancache_flush_fs,
     .init_shared_fs = ycache_cleancache_init_shared_fs,
     .init_fs = ycache_cleancache_init_fs};
-/*
- * On Linux 4.1, cleancache_register_ops return int instead of
- * pointer to cleancache_ops
- */
+
 static inline __init void ycache_cleancache_register_ops(void)
 {
 	// pr_debug("call %s()\n", __FUNCTION__);
 	cleancache_register_ops(&ycache_cleancache_ops);
 }
 
-#endif
-
-#ifdef CONFIG_FRONTSWAP
-/* a single tmem poolid is used for all frontswap "types" (swapfiles) */
-static int ycache_frontswap_poolid = -1;
-
-/*
- * Swizzling increases objects per swaptype, increasing tmem concurrency
- * for heavy swaploads.  Later, larger nr_cpus -> larger SWIZ_BITS
- * Setting SWIZ_BITS to 27 basically reconstructs the swap entry from
- * frontswap_load(), but has side-effects. Hence using 8.
- */
-#define SWIZ_BITS 8
-#define SWIZ_MASK ((1 << SWIZ_BITS) - 1)
-#define _oswiz(_type, _ind) ((_type << SWIZ_BITS) | (_ind & SWIZ_MASK))
-#define iswiz(_ind) (_ind >> SWIZ_BITS)
-
-static inline struct tmem_oid oswiz(unsigned type, u32 ind)
-{
-	struct tmem_oid oid = {.oid = {0}};
-	oid.oid[0] = _oswiz(type, ind);
-	return oid;
-}
-
-static int ycache_frontswap_store(unsigned type, pgoff_t offset,
-				  struct page *page)
-{
-	u64 ind64 = (u64)offset;
-	u32 ind = (u32)offset;
-	struct tmem_oid oid = oswiz(type, ind);
-	int ret = -1;
-
-	// pr_debug("call %s()\n", __FUNCTION__);
-	BUG_ON(!PageLocked(page));
-	if (likely(ind64 == ind))
-		ret = ycache_put_page(ycache_frontswap_poolid, &oid, iswiz(ind),
-				      page);
-
-	return ret;
-}
-
-/* returns 0 if the page was successfully gotten from frontswap, -1 if
- * was not present (should never happen!) */
-static int ycache_frontswap_load(unsigned type, pgoff_t offset,
-				 struct page *page)
-{
-	u64 ind64 = (u64)offset;
-	u32 ind = (u32)offset;
-	struct tmem_oid oid = oswiz(type, ind);
-	int ret = -1;
-
-	// pr_debug("call %s()\n", __FUNCTION__);
-	BUG_ON(!PageLocked(page));
-	if (likely(ind64 == ind))
-		ret = ycache_get_page(ycache_frontswap_poolid, &oid, iswiz(ind),
-				      page);
-	return ret;
-}
-
-/* flush a single page from frontswap */
-static void ycache_frontswap_flush_page(unsigned type, pgoff_t offset)
-{
-	u64 ind64 = (u64)offset;
-	u32 ind = (u32)offset;
-	struct tmem_oid oid = oswiz(type, ind);
-
-	// pr_debug("call %s()\n", __FUNCTION__);
-	if (likely(ind64 == ind))
-		(void)ycache_flush_page(ycache_frontswap_poolid, &oid,
-					iswiz(ind));
-}
-
-/* flush all pages from the passed swaptype */
-static void ycache_frontswap_flush_area(unsigned type)
-{
-	struct tmem_oid oid;
-	int ind;
-
-	// pr_debug("call %s()\n", __FUNCTION__);
-	for (ind = SWIZ_MASK; ind >= 0; ind--) {
-		oid = oswiz(type, ind);
-		(void)ycache_flush_inode(ycache_frontswap_poolid, &oid);
-	}
-}
-
-static void ycache_frontswap_init(unsigned ignored)
-{
-	// pr_debug("call %s()\n", __FUNCTION__);
-	/* a single poolid is used for all frontswap "types" (swapfiles)*/
-	if (ycache_frontswap_poolid < 0)
-		ycache_frontswap_poolid = ycache_new_pool(TMEM_POOL_PERSIST);
-}
-
-static struct frontswap_ops ycache_frontswap_ops = {
-    .store = ycache_frontswap_store,
-    .load = ycache_frontswap_load,
-    .invalidate_page = ycache_frontswap_flush_page,
-    .invalidate_area = ycache_frontswap_flush_area,
-    .init = ycache_frontswap_init};
-
-static inline __init void ycache_frontswap_register_ops(void)
-{
-	// pr_debug("call %s()\n", __FUNCTION__);
-	frontswap_register_ops(&ycache_frontswap_ops);
-}
 #endif
 
 static int ycache_cpu_notifier(struct notifier_block *nb, unsigned long action,
@@ -1211,9 +1016,7 @@ static int __init ycache_debugfs_init(void)
 	debugfs_create_u64("flobj_found", S_IRUGO, ycache_debugfs_root,
 			   &ycache_flobj_found);
 	debugfs_create_u64("failed_eph_puts", S_IRUGO, ycache_debugfs_root,
-			   &ycache_failed_eph_puts);
-	debugfs_create_u64("failed_pers_puts", S_IRUGO, ycache_debugfs_root,
-			   &ycache_failed_pers_puts);
+			   &ycache_failed_puts);
 	debugfs_create_u64("failed_get_free_pages", S_IRUGO,
 			   ycache_debugfs_root, &ycache_failed_get_free_pages);
 	debugfs_create_u64("ycache_failed_alloc", S_IRUGO, ycache_debugfs_root,
@@ -1284,10 +1087,6 @@ static int __init ycache_init(void)
 #ifdef CONFIG_CLEANCACHE
 	ycache_cleancache_register_ops();
 	pr_info("cleancache enabled using kernel transcendent memory\n");
-#endif
-#ifdef CONFIG_FRONTSWAP
-	ycache_frontswap_register_ops();
-	pr_info("frontswap enabled using kernel transcendent memory\n");
 #endif
 	if (ycache_debugfs_init())
 		pr_warn("debugfs initialization failed\n");
