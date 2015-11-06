@@ -621,15 +621,15 @@ static int ycache_pampd_get_data(char *data, size_t *bufsize, bool raw,
 
 	// pr_debug("call %s()\n", __FUNCTION__);
 	// BUG_ON(is_ephemeral(pool));
-	BUG_ON(pampd == NULL);
+	// BUG_ON(pampd == NULL);
 	BUG_ON(data == NULL);
 
-	ycache_tree = get_ycache_tree(index);
-	spin_lock(&ycache_tree->lock);
 	entry = (struct ycache_entry *)pampd;
-	ycache_entry_get(entry);
-	spin_unlock(&ycache_tree->lock);
 	if (entry) {
+		ycache_tree = get_ycache_tree(index);
+		spin_lock(&ycache_tree->lock);
+		ycache_entry_get(entry);
+		spin_unlock(&ycache_tree->lock);
 		src = kmap_atomic(entry->page);
 		dst = kmap_atomic((struct page *)data);
 		copy_page(dst, src);
@@ -873,7 +873,7 @@ static void ycache_cleancache_flush_fs(int pool_id)
 	while (atomic_read(&pool->refcount) != 0)
 		;
 	local_bh_disable();
-	ret = tmem_destroy_pool(pool);
+	tmem_destroy_pool(pool);
 	local_bh_enable();
 	kfree(pool);
 	pr_info("destroyed pool id=%d", pool_id);
