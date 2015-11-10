@@ -132,7 +132,7 @@ static int __init ycache_entry_cache_create(void)
 	return ycache_entry_cache == NULL;
 }
 
-static void __init ycache_entry_cache_destroy(void)
+__attribute__((unused)) static void __init ycache_entry_cache_destroy(void)
 {
 	// pr_debug("call %s()\n", __FUNCTION__);
 	kmem_cache_destroy(ycache_entry_cache);
@@ -635,15 +635,15 @@ static int ycache_pampd_get_data(char *data, size_t *bufsize, bool raw,
 		copy_page(dst, src);
 		kunmap_atomic(dst);
 		kunmap_atomic(src);
+		spin_lock(&ycache_tree->lock);
+		ycache_entry_put(ycache_tree, entry);
+		spin_unlock(&ycache_tree->lock);
 	} else {
 		goto out;
 	}
 
 	ret = 0;
 out:
-	spin_lock(&ycache_tree->lock);
-	ycache_entry_put(ycache_tree, entry);
-	spin_unlock(&ycache_tree->lock);
 	return ret;
 }
 
@@ -860,7 +860,7 @@ static void ycache_cleancache_flush_inode(int pool_id,
 static void ycache_cleancache_flush_fs(int pool_id)
 {
 	struct tmem_pool *pool = NULL;
-	int ret = -1;
+
 	// pr_debug("call %s()\n", __FUNCTION__);
 	if (unlikely(pool_id < 0))
 		return;
@@ -1026,7 +1026,7 @@ static int __init ycache_debugfs_init(void)
 	return 0;
 }
 
-static void __exit ycache_debugfs_exit(void)
+__attribute__((unused)) static void __exit ycache_debugfs_exit(void)
 {
 	// pr_debug("call %s()\n", __FUNCTION__);
 	debugfs_remove_recursive(ycache_debugfs_root);
