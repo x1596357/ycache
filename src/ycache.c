@@ -48,6 +48,7 @@
 #define MAX_PAGE_RBTREES MAX_POOLS
 #define MAX_ENTRY_LISTS MAX_POOLS
 /* Use MD5 as hash function for now */
+#define YCACHE_HASH_FUNC "md5"
 #define HASH_DIGEST_SIZE MD5_DIGEST_SIZE
 
 /* Some of the statistics below are not protected from concurrent access for
@@ -86,16 +87,13 @@ static u64 ycache_curr_objnode_count_max;
 /*********************************
 * data structures
 **********************************/
-/* rbtree roots of page_entry, these rbtrees are all protected by 
+/* rbtree roots of page_entry, these rbtrees are all protected by
  * the lock in ycache_host
  */
 static struct rb_root rbroots[MAX_PAGE_RBTREES];
 
 /* use the hash[0] select a rbroot */
-static inline struct rb_root *get_rbroot(u8 *hash)
-{
-	return &rbroots[hash[0]];
-}
+static inline struct rb_root *get_rbroot(u8 *hash) { return &rbroots[hash[0]]; }
 /*
  * struct page_entry
  *
@@ -103,19 +101,17 @@ static inline struct rb_root *get_rbroot(u8 *hash)
  * rbnode - red-black tree node
  * hash   - contains the hash value. Since we use array to store it, we
  * 	    need to hardcode the size.
- * refcount - the number of reference to this page. When a page_entry
- * 	      is created, refcount is 1. When the page is deduplicated,
- * 	      refcount increase by 1. When using this page_entry refcount
- * 	      increase by 1. And after page_entry is put back, refcount
- * 	      decrease by 1. When this page is flushed, refcount decrease
- * 	      by 1. Upon refcount drop to 0, this page_entry should be freed.
+ * page_nr - the  number of the same pages. When a page_entry
+ * 	      is created, page_nr is 1. When the page is deduplicated,
+ * 	      page_nr increase by 1. When one page is flushed, page_nr decrease
+ * 	      by 1. Upon page_nr drop to 0, this page_entry should be freed.
  * 	      Changing the value required ycache_host lock being held.
  */
 struct page_entry {
 	struct page *page;
 	struct rb_node rbnode;
 	u8 hash[HASH_DIGEST_SIZE];
-	int refcount;
+	int page_nr;
 };
 
 /*********************************
@@ -149,7 +145,7 @@ static struct page_entry *page_entry_cache_alloc(gfp_t gfp)
 		/* alloc page*/
 		entry->page = alloc_page(gfp | __GFP_HIGHMEM);
 		if (likely(entry->page != NULL)) {
-			entry->refcount = 1;
+			entry->page_nr = 1;
 			RB_CLEAR_NODE(&entry->rbnode);
 			atomic_inc(&ycache_used_pages);
 			return entry;
@@ -205,7 +201,7 @@ static struct page_entry *page_rb_search(struct rb_root *root, u8 *hash)
  * -EEXIST
  */
 static int page_rb_insert(struct rb_root *root, struct page_entry *entry,
-			    struct page_entry **dupentry)
+			  struct page_entry **dupentry)
 {
 	struct rb_node **link = &root->rb_node, *parent = NULL;
 	struct page_entry *tmp_entry;
@@ -240,37 +236,23 @@ static void page_rb_erase(struct rb_root *root, struct page_entry *entry)
 }
 
 /* caller must hold the tree lock */
-static inline void page_entry_get(struct page_entry *entry)
+static inline void page_entry_nr_inc(struct page_entry *entry)
 {
-	entry->refcount++;
+	entry->page_nr++;
 }
 
 /* caller must hold the tree lock
  * remove from the tree and free it, if nobody reference the entry
  */
-static void page_entry_put(struct rb_root *rbroot,
-			     struct page_entry *entry)
+static void page_entry_nr_dec(struct rb_root *rbroot, struct page_entry *entry)
 {
-	int refcount = --entry->refcount;
+	int page_nr = --entry->page_nr;
 
-	BUG_ON(refcount < 0);
-	if (refcount == 0) {
+	BUG_ON(page_nr < 0);
+	if (page_nr == 0) {
 		page_rb_erase(rbroot, entry);
 		page_entry_cache_free(entry);
 	}
-}
-
-/* caller must hold the tree lock */
-static struct page_entry *page_entry_find_get(struct rb_root *rbroot,
-						  u8 *hash)
-{
-	struct page_entry *entry = NULL;
-
-	entry = page_rb_search(rbroot, hash);
-	if (entry)
-		page_entry_get(entry);
-
-	return entry;
 }
 
 /*
@@ -291,7 +273,7 @@ static int page_to_hash(const void *src, u8 *result)
 
 	// pr_debug("call %s()\n", __FUNCTION__);
 	sg_init_one(&sg, (u8 *)src, PAGE_SIZE);
-	desc.tfm = crypto_alloc_hash("md5", 0, CRYPTO_ALG_ASYNC);
+	desc.tfm = crypto_alloc_hash(YCACHE_HASH_FUNC, 0, CRYPTO_ALG_ASYNC);
 	/* fail to allocate a cipher handle */
 	if (unlikely(IS_ERR(desc.tfm))) {
 		ret = -EINVAL;
@@ -332,14 +314,14 @@ static int is_page_same(struct page *p1, struct page *p2)
 /* ycache entry lists, every tmem pool has such a list */
 static struct list_head ycache_entry_lists[MAX_ENTRY_LISTS];
 
-/* struct ycache_entry 
+/* struct ycache_entry
  *
  * oid - object id in tmem, similar to inode
  * index - offset in a file
  * page_entry - pointer to page_entry where the page resides
  * list - list node in free lists for shrinker implementation
  */
-struct ycache_entry{
+struct ycache_entry {
 	struct tmem_oid oid;
 	uint32_t index;
 	struct page_entry *page_entry;
@@ -601,22 +583,23 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 	// pr_debug("call %s()\n", __FUNCTION__);
 
 	BUG_ON(data == NULL);
+
+	ycache_entry = ycache_entry_cache_alloc(YCACHE_GFP_MASK);
+	if (unlikely(ycache_entry == NULL)) {
+		goto reject_ycache_entry;
+	}
+	ycache_entry->oid = *oid;
+	ycache_entry->index = index;
+
 	page = (struct page *)data;
 	/* calculating MD5 may sleep, thus have to use kmap */
 	src = kmap(page);
 	page_to_hash(src, hash);
 	kunmap(page);
 
-	ycache_entry=ycache_entry_cache_alloc(YCACHE_GFP_MASK);
-	if (unlikely(ycache_entry == NULL)) {
-		goto reject_ycache_entry;
-	}
-	ycache_entry->oid=*oid;
-	ycache_entry->index=index;
-
 	rbroot = get_rbroot(hash);
 	spin_lock(&ycache_host.lock);
-	page_entry = page_entry_find_get(rbroot, hash);
+	page_entry = page_rb_search(rbroot, hash);
 	/* hash not exists */
 	if (likely(page_entry == NULL)) {
 		spin_unlock(&ycache_host.lock);
@@ -635,11 +618,10 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 		memcpy(page_entry->hash, hash, HASH_DIGEST_SIZE);
 
 		/* set page_entry before holding lock */
-		ycache_entry->page_entry=page_entry;
+		ycache_entry->page_entry = page_entry;
 
 		spin_lock(&ycache_host.lock);
-		result =
-		    page_rb_insert(rbroot, page_entry, &dupentry);
+		result = page_rb_insert(rbroot, page_entry, &dupentry);
 		// this rarely happens, it has to be taken cared of (reject)
 		// should it happen
 		if (unlikely(result == -EEXIST)) {
@@ -648,7 +630,8 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 			goto reject_page_entry;
 		} else {
 			/* add to free list */
-			list_add(&ycache_entry->list,&ycache_entry_lists[pool->pool_id]);
+			list_add(&ycache_entry->list,
+				 &ycache_entry_lists[pool->pool_id]);
 			spin_unlock(&ycache_host.lock);
 			pampd = (void *)ycache_entry;
 		}
@@ -656,19 +639,17 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 	/* hash exists, compare bit by bit */
 	else if (likely(is_page_same(page_entry->page, page))) {
 		/* set page_entry */
-		ycache_entry->page_entry=page_entry;
-		/* deduplicated one page, refcount++ */
-		page_entry->refcount++;
-		/* drop local reference */
-		page_entry_put(rbroot, page_entry);
+		ycache_entry->page_entry = page_entry;
+		/* deduplicated one page, page_nr++ */
+		page_entry_nr_inc(page_entry);
 		/* add to free list */
-		list_add(&ycache_entry->list,&ycache_entry_lists[pool->pool_id]);
+		list_add(&ycache_entry->list,
+			 &ycache_entry_lists[pool->pool_id]);
 		spin_unlock(&ycache_host.lock);
 		pampd = (void *)ycache_entry;
 	}
 	/* hash is the same but data is not */
 	else {
-		page_entry_put(rbroot, page_entry);
 		spin_unlock(&ycache_host.lock);
 		ycache_hash_collision++;
 		goto reject_page_entry;
@@ -687,7 +668,6 @@ static int ycache_pampd_get_data(char *data, size_t *bufsize, bool raw,
 {
 	struct ycache_entry *ycache_entry;
 	struct page_entry *page_entry;
-	struct rb_root *rbroot;
 	u8 *src, *dst;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
@@ -699,24 +679,17 @@ static int ycache_pampd_get_data(char *data, size_t *bufsize, bool raw,
 
 	ycache_entry = (struct ycache_entry *)pampd;
 	if (ycache_entry) {
-		page_entry=ycache_entry->page_entry;
-		BUG_ON(page_entry==NULL);
-
-		spin_lock(&ycache_host.lock);
-		page_entry_get(page_entry);
-		spin_unlock(&ycache_host.lock);
-		
+		page_entry = ycache_entry->page_entry;
+		BUG_ON(page_entry == NULL);
+		/* We don't aquire the lock here since pampd is not NULL, it's
+		 * safe to assume page_entry can't disappear when being used.
+		 */
 		/* return a copy of page*/
 		src = kmap_atomic(page_entry->page);
 		dst = kmap_atomic((struct page *)data);
 		copy_page(dst, src);
 		kunmap_atomic(dst);
 		kunmap_atomic(src);
-
-		rbroot = get_rbroot(page_entry->hash);
-		spin_lock(&ycache_host.lock);
-		page_entry_put(rbroot, page_entry);
-		spin_unlock(&ycache_host.lock);
 		return 0;
 	} else {
 		return -EINVAL;
@@ -737,16 +710,19 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 	BUG_ON(pampd == NULL);
 	BUG_ON(data == NULL);
 
-	ycache_entry=(struct ycache_entry *)pampd;
-	page_entry=ycache_entry->page_entry;
+	ycache_entry = (struct ycache_entry *)pampd;
+	page_entry = ycache_entry->page_entry;
+	BUG_ON(page_entry == NULL);
 
+	/* Remove from list and free it */
+	spin_lock(&ycache_host.lock);
 	list_del(&ycache_entry->list);
+	spin_unlock(&ycache_host.lock);
 	ycache_entry_cache_free(ycache_entry);
 
-	spin_lock(&ycache_host.lock);
-	page_entry_get(page_entry);
-	spin_unlock(&ycache_host.lock);
-
+	/* We don't aquire the lock here since pampd is not NULL, it's safe to
+	 * assume that page_entry can't disappear when being used.
+	 */
 	/* Get a copy of page */
 	src = kmap_atomic(page_entry->page);
 	dst = kmap_atomic((struct page *)data);
@@ -754,12 +730,10 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 	kunmap_atomic(dst);
 	kunmap_atomic(src);
 
+	rbroot = get_rbroot(page_entry->hash);
 	spin_lock(&ycache_host.lock);
-	rbroot=get_rbroot(page_entry->hash);
-	/* drop local reference */
-	page_entry_put(rbroot, page_entry);
-	/* drop one reference upon creation or deduplication */
-	page_entry_put(rbroot, page_entry);
+	/* drop one page count */
+	page_entry_nr_dec(rbroot, page_entry);
 	spin_unlock(&ycache_host.lock);
 
 	return 0;
@@ -780,17 +754,20 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 	BUG_ON(!is_ephemeral(pool));
 	BUG_ON(pampd == NULL);
 
-	ycache_entry=(struct ycache_entry *)pampd;
-	page_entry=ycache_entry->page_entry;
+	ycache_entry = (struct ycache_entry *)pampd;
+	page_entry = ycache_entry->page_entry;
+	BUG_ON(page_entry == NULL);
 
 	/* Remove from list and free it */
+	spin_lock(&ycache_host.lock);
 	list_del(&ycache_entry->list);
+	spin_unlock(&ycache_host.lock);
 	ycache_entry_cache_free(ycache_entry);
 
+	rbroot = get_rbroot(page_entry->hash);
 	spin_lock(&ycache_host.lock);
-	rbroot=get_rbroot(page_entry->hash);
-	/* drop one reference upon creation or deduplication */
-	page_entry_put(rbroot, page_entry);
+	/* drop one page count */
+	page_entry_nr_dec(rbroot, page_entry);
 	spin_unlock(&ycache_host.lock);
 }
 
@@ -1143,7 +1120,7 @@ static void __exit ycache_debugfs_exit(void)
 static int __init ycache_init(void)
 {
 	pr_info("loading\n");
-	
+
 	init_ycache_host();
 	if (unlikely(register_cpu_notifier(&ycache_cpu_notifier_block))) {
 		pr_err("can't register cpu notifier\n");
