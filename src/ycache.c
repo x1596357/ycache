@@ -40,6 +40,7 @@
 
 #ifdef CONFIG_CLEANCACHE
 #include <linux/cleancache.h>
+#include <linux/shrinker.h>
 #endif
 
 #define YCACHE_GFP_MASK                                                        \
@@ -47,6 +48,7 @@
 #define MAX_POOLS 256
 #define MAX_PAGE_RBTREES MAX_POOLS
 #define MAX_ENTRY_LISTS MAX_POOLS
+#define PAGE_NR_THRESHOLD 10
 /* Use MD5 as hash function for now */
 #define YCACHE_HASH_FUNC "md5"
 #define HASH_DIGEST_SIZE MD5_DIGEST_SIZE
@@ -84,6 +86,7 @@ static u64 ycache_curr_obj_count_max;
 static atomic_t ycache_curr_objnode_count = ATOMIC_INIT(0);
 static u64 ycache_curr_objnode_count_max;
 
+#ifdef CONFIG_CLEANCACHE
 /*********************************
 * data structures
 **********************************/
@@ -580,7 +583,7 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 	u8 hash[HASH_DIGEST_SIZE];
 	u8 *src, *dst;
 
-	// pr_debug("call %s()\n", __FUNCTION__);
+	pr_debug("call %s()\n", __FUNCTION__);
 
 	BUG_ON(data == NULL);
 
@@ -630,8 +633,8 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 			goto reject_page_entry;
 		} else {
 			/* add to free list */
-			list_add(&ycache_entry->list,
-				 &ycache_entry_lists[pool->pool_id]);
+			list_add_tail(&ycache_entry->list,
+				      &ycache_entry_lists[pool->pool_id]);
 			spin_unlock(&ycache_host.lock);
 			pampd = (void *)ycache_entry;
 		}
@@ -643,8 +646,8 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 		/* deduplicated one page, page_nr++ */
 		page_entry_nr_inc(page_entry);
 		/* add to free list */
-		list_add(&ycache_entry->list,
-			 &ycache_entry_lists[pool->pool_id]);
+		list_add_tail(&ycache_entry->list,
+			      &ycache_entry_lists[pool->pool_id]);
 		spin_unlock(&ycache_host.lock);
 		pampd = (void *)ycache_entry;
 	}
@@ -750,7 +753,7 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 	struct page_entry *page_entry;
 	struct rb_root *rbroot;
 
-	// pr_debug("call %s()\n", __FUNCTION__);
+	pr_debug("call %s()\n", __FUNCTION__);
 	BUG_ON(!is_ephemeral(pool));
 	BUG_ON(pampd == NULL);
 
@@ -808,8 +811,7 @@ static struct tmem_pamops ycache_pamops = {
 /* These are "cleancache" which is used as a second-chance cache for clean
  * page cache pages;
  */
-
-#ifdef CONFIG_CLEANCACHE
+static bool freeing = false;
 static void ycache_cleancache_put_page(int pool_id,
 				       struct cleancache_filekey key,
 				       pgoff_t index, struct page *page)
@@ -819,7 +821,13 @@ static void ycache_cleancache_put_page(int pool_id,
 	u32 tmp_index = (u32)index;
 	int ret = -1;
 
-	// pr_debug("call %s()\n", __FUNCTION__);
+	pr_debug("call %s()\n", __FUNCTION__);
+
+	// Shrinker is being called, reject all puts
+	if (unlikely(freeing == true)) {
+		return;
+	}
+
 	if (unlikely(tmp_index != index))
 		return;
 
@@ -910,7 +918,7 @@ static void ycache_cleancache_flush_inode(int pool_id,
 	int ret = -1;
 	// unsigned long flags;
 
-	// pr_debug("call %s()\n", __FUNCTION__);
+	pr_debug("call %s()\n", __FUNCTION__);
 	ycache_flobj_total++;
 	// local_irq_save(flags);
 	pool = ycache_get_pool_by_id(pool_id);
@@ -928,7 +936,7 @@ static void ycache_cleancache_flush_fs(int pool_id)
 {
 	struct tmem_pool *pool = NULL;
 
-	// pr_debug("call %s()\n", __FUNCTION__);
+	pr_debug("call %s()\n", __FUNCTION__);
 	if (unlikely(pool_id < 0))
 		return;
 
@@ -951,7 +959,7 @@ static int ycache_cleancache_init_fs(size_t pagesize)
 	struct tmem_pool *pool;
 	int pool_id = -1;
 
-	// pr_debug("call %s()\n", __FUNCTION__);
+	pr_debug("call %s()\n", __FUNCTION__);
 	BUG_ON(sizeof(struct cleancache_filekey) != sizeof(u64[3]));
 	BUG_ON(pagesize != PAGE_SIZE);
 
@@ -961,7 +969,8 @@ static int ycache_cleancache_init_fs(size_t pagesize)
 		goto out;
 	}
 
-	pool_id = idr_alloc(&ycache_host.tmem_pools, pool, 0, 0, GFP_KERNEL);
+	pool_id =
+	    idr_alloc(&ycache_host.tmem_pools, pool, 0, MAX_POOLS, GFP_KERNEL);
 
 	if (unlikely(pool_id < 0)) {
 		pr_warn("pool creation failed: error %d\n", pool_id);
@@ -1004,7 +1013,103 @@ static inline __init void ycache_cleancache_register_ops(void)
 	cleancache_register_ops(&ycache_cleancache_ops);
 }
 
-#endif
+/* return the pages count that can be freed */
+static unsigned long ycache_shrinker_count(struct shrinker *shrinker,
+					   struct shrink_control *sc)
+{
+	pr_debug("call %s() nr:%lu\n", __FUNCTION__, sc->nr_to_scan);
+	return (unsigned long)atomic_read(&ycache_used_pages);
+}
+
+/* scan and free pages */
+static unsigned long ycache_shrinker_scan(struct shrinker *shrinker,
+					  struct shrink_control *sc)
+{
+	unsigned long nr = sc->nr_to_scan;
+	unsigned long init_nr = nr;
+	static uint32_t last_pool_id = 0;
+	uint32_t pool_id = last_pool_id;
+	struct tmem_pool *pool;
+	struct ycache_entry *ycache_entry;
+	/* the least page number a page_entry has to have to be free
+	 * we try to free page_entry with lesser page_nr first
+	 */
+	int least_page_nr = 1;
+	int empty_pool_nr = 0;
+
+	pr_debug("call %s() nr:%lu\n", __FUNCTION__, nr);
+
+	/* set freeing to true to reject all puts because we don't want to
+	 * undo our efforts to free memory
+	 */
+	freeing = true;
+retry:
+	while ((pool_id + 1) % MAX_POOLS != last_pool_id && nr > 0) {
+		spin_lock(&ycache_host.lock);
+		// Check is list is empty
+		if (list_empty(&ycache_entry_lists[pool_id])) {
+			spin_unlock(&ycache_host.lock);
+			// this list is empty, find in next one
+			pool_id++;
+			empty_pool_nr++;
+			continue;
+		}
+
+		// Find pool success, reset counter
+		empty_pool_nr = 0;
+		pool = ycache_get_pool_by_id(pool_id);
+		BUG_ON(pool == NULL);
+		// Iterate through the list to find the first ycache_entry
+		// whose corresponding page_entry has page_nr <= least_page_nr,
+		// or page_nr >= PAGE_NR_THRESHOLD, which means to free all
+		// page_entrys
+		list_for_each_entry(ycache_entry, &ycache_entry_lists[pool_id],
+				    list)
+		{
+			if (ycache_entry->page_entry->page_nr <=
+				least_page_nr ||
+			    ycache_entry->page_entry->page_nr >=
+				PAGE_NR_THRESHOLD) {
+				break;
+			}
+		}
+
+		// Fail to find one in this list, should try next one.
+		if (ycache_entry->page_entry->page_nr > least_page_nr &&
+		    ycache_entry->page_entry->page_nr < PAGE_NR_THRESHOLD) {
+			spin_unlock(&ycache_host.lock);
+			pool_id++;
+			continue;
+		}
+
+		// actually freed one page
+		if (ycache_entry->page_entry->page_nr == 1)
+			nr--;
+		spin_unlock(&ycache_host.lock);
+		tmem_flush_page(pool, &ycache_entry->oid, ycache_entry->index);
+		ycache_put_pool(pool);
+
+		// Try to spread page freeing across all pools
+		last_pool_id = pool_id++;
+	}
+	// exit the while loop because freeing is done or all pools are empty
+	if (nr == 0 || empty_pool_nr == MAX_POOLS) {
+		freeing = false;
+		pr_debug("end %s() init-nr:%lu\n", __FUNCTION__, init_nr - nr);
+		return init_nr - nr;
+	}
+
+	// exit the while loop because can't find enough page_entry with the
+	// least page_nr, needs to increase least_page_nr.
+	least_page_nr++;
+	goto retry;
+}
+
+static struct shrinker ycache_shrinker = {
+    .count_objects = ycache_shrinker_count,
+    .scan_objects = ycache_shrinker_scan,
+    .seeks = DEFAULT_SEEKS,
+};
 
 static int ycache_cpu_notifier(struct notifier_block *nb, unsigned long action,
 			       void *pcpu)
@@ -1035,6 +1140,8 @@ static int ycache_cpu_notifier(struct notifier_block *nb, unsigned long action,
 
 static struct notifier_block ycache_cpu_notifier_block = {
     .notifier_call = ycache_cpu_notifier};
+
+#endif
 
 /*********************************
 * debugfs functions
@@ -1100,17 +1207,6 @@ __attribute__((unused)) static void __exit ycache_debugfs_exit(void)
 	// pr_debug("call %s()\n", __FUNCTION__);
 	debugfs_remove_recursive(ycache_debugfs_root);
 }
-#else
-static int __init ycache_debugfs_init(void)
-{
-	// pr_debug("call %s()\n", __FUNCTION__);
-	return 0;
-}
-
-static void __exit ycache_debugfs_exit(void)
-{
-	// pr_debug("call %s()\n", __FUNCTION__);
-}
 #endif
 
 /*
@@ -1120,7 +1216,7 @@ static void __exit ycache_debugfs_exit(void)
 static int __init ycache_init(void)
 {
 	pr_info("loading\n");
-
+#ifdef CONFIG_CLEANCACHE
 	init_ycache_host();
 	if (unlikely(register_cpu_notifier(&ycache_cpu_notifier_block))) {
 		pr_err("can't register cpu notifier\n");
@@ -1144,16 +1240,19 @@ static int __init ycache_init(void)
 	}
 	tmem_register_hostops(&ycache_hostops);
 	tmem_register_pamops(&ycache_pamops);
-#ifdef CONFIG_CLEANCACHE
 	ycache_cleancache_register_ops();
+	register_shrinker(&ycache_shrinker);
 	pr_info("cleancache enabled using kernel transcendent memory\n");
 #endif
+#ifdef CONFIG_DEBUG_FS
 	if (ycache_debugfs_init())
 		pr_warn("debugfs initialization failed\n");
+#endif
 
 	pr_info("loaded without errors \n");
 	return 0;
 
+#ifdef CONFIG_CLEANCACHE
 ycache_obj_cache_fail:
 	ycache_objnode_cache_destroy();
 ycache_objnode_cache_fail:
@@ -1162,6 +1261,7 @@ entry_cache_fail:
 	ycache_entry_cache_destroy();
 ycache_entry_cache_fail:
 	return -ENOMEM;
+#endif
 }
 
 /* must be late so crypto has time to come up */
