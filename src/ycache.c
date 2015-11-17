@@ -1007,12 +1007,6 @@ static struct cleancache_ops ycache_cleancache_ops = {
     .init_shared_fs = ycache_cleancache_init_shared_fs,
     .init_fs = ycache_cleancache_init_fs};
 
-static inline __init void ycache_cleancache_register_ops(void)
-{
-	// pr_debug("call %s()\n", __FUNCTION__);
-	cleancache_register_ops(&ycache_cleancache_ops);
-}
-
 /* return the pages count that can be freed */
 static unsigned long ycache_shrinker_count(struct shrinker *shrinker,
 					   struct shrink_control *sc)
@@ -1078,6 +1072,7 @@ retry:
 		if (ycache_entry->page_entry->page_nr > least_page_nr &&
 		    ycache_entry->page_entry->page_nr < PAGE_NR_THRESHOLD) {
 			spin_unlock(&ycache_host.lock);
+			ycache_put_pool(pool);
 			pool_id++;
 			continue;
 		}
@@ -1218,10 +1213,6 @@ static int __init ycache_init(void)
 	pr_info("loading\n");
 #ifdef CONFIG_CLEANCACHE
 	init_ycache_host();
-	if (unlikely(register_cpu_notifier(&ycache_cpu_notifier_block))) {
-		pr_err("can't register cpu notifier\n");
-		/* do nothing since we can still function without it*/
-	}
 	if (unlikely(ycache_entry_cache_create())) {
 		pr_err("ycache_entry_cache creation failed\n");
 		goto ycache_entry_cache_fail;
@@ -1238,11 +1229,15 @@ static int __init ycache_init(void)
 		pr_err("ycache_obj_cache creation failed\n");
 		goto ycache_obj_cache_fail;
 	}
+	if (unlikely(register_cpu_notifier(&ycache_cpu_notifier_block))) {
+		pr_err("can't register cpu notifier\n");
+		/* do nothing since we can still function without it*/
+	}
 	tmem_register_hostops(&ycache_hostops);
 	tmem_register_pamops(&ycache_pamops);
-	ycache_cleancache_register_ops();
-	register_shrinker(&ycache_shrinker);
+	cleancache_register_ops(&ycache_cleancache_ops);
 	pr_info("cleancache enabled using kernel transcendent memory\n");
+	register_shrinker(&ycache_shrinker);
 #endif
 #ifdef CONFIG_DEBUG_FS
 	if (ycache_debugfs_init())
