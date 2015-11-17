@@ -62,6 +62,10 @@
 static atomic_t ycache_used_pages = ATOMIC_INIT(0);
 /* Total pages got in the module */
 static atomic_t ycache_total_pages = ATOMIC_INIT(0);
+/* Pool limit was hit (see ycache_max_pool_percent) */
+static u64 ycache_pool_limit_hit;
+/* Store failed due to a reclaim failure after pool limit was reached */
+static u64 ycache_reject_reclaim_fail;
 /* Store failed because the ycache_entry could not be allocated */
 static u64 ycache_yentry_fail;
 /* Store failed because the page_entry could not be allocated */
@@ -87,6 +91,22 @@ static atomic_t ycache_curr_objnode_count = ATOMIC_INIT(0);
 static u64 ycache_curr_objnode_count_max;
 
 #ifdef CONFIG_CLEANCACHE
+
+/*********************************
+* helpers
+**********************************/
+/* The maximum percentage of memory that the pool can occupy
+ * TODO: should use free pages available instead
+ */
+static unsigned int ycache_max_pool_percent = 20;
+module_param_named(max_pool_percent, ycache_max_pool_percent, uint, 0644);
+
+static bool ycache_is_full(void)
+{
+	return totalram_pages * ycache_max_pool_percent / 100 <
+	       atomic_read(&ycache_used_pages);
+}
+
 /*********************************
 * data structures
 **********************************/
@@ -583,7 +603,7 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 	u8 hash[HASH_DIGEST_SIZE];
 	u8 *src, *dst;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 
 	BUG_ON(data == NULL);
 
@@ -812,6 +832,10 @@ static struct tmem_pamops ycache_pamops = {
  * page cache pages;
  */
 static bool freeing = false;
+
+/* Forward reference */
+static unsigned long ycache_shrink(unsigned long);
+
 static void ycache_cleancache_put_page(int pool_id,
 				       struct cleancache_filekey key,
 				       pgoff_t index, struct page *page)
@@ -821,19 +845,34 @@ static void ycache_cleancache_put_page(int pool_id,
 	u32 tmp_index = (u32)index;
 	int ret = -1;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 
 	// Shrinker is being called, reject all puts
 	if (unlikely(freeing == true)) {
+		ycache_failed_puts++;
 		return;
 	}
 
-	if (unlikely(tmp_index != index))
+	/* reclaim space if needed */
+	if (ycache_is_full()) {
+		ycache_pool_limit_hit++;
+		if (ycache_shrink(1) != 1) {
+			ycache_reject_reclaim_fail++;
+			ycache_failed_puts++;
+			return;
+		}
+	}
+
+	if (unlikely(tmp_index != index)) {
+		ycache_failed_puts++;
 		return;
+	}
 
 	pool = ycache_get_pool_by_id(pool_id);
-	if (unlikely(pool == NULL))
+	if (unlikely(pool == NULL)) {
+		ycache_failed_puts++;
 		return;
+	}
 
 	// local_irq_save(flags);
 	preempt_disable();
@@ -918,7 +957,7 @@ static void ycache_cleancache_flush_inode(int pool_id,
 	int ret = -1;
 	// unsigned long flags;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	ycache_flobj_total++;
 	// local_irq_save(flags);
 	pool = ycache_get_pool_by_id(pool_id);
@@ -1015,11 +1054,9 @@ static unsigned long ycache_shrinker_count(struct shrinker *shrinker,
 	return (unsigned long)atomic_read(&ycache_used_pages);
 }
 
-/* scan and free pages */
-static unsigned long ycache_shrinker_scan(struct shrinker *shrinker,
-					  struct shrink_control *sc)
+/* ycache shrinker  */
+static unsigned long ycache_shrink(unsigned long nr)
 {
-	unsigned long nr = sc->nr_to_scan;
 	unsigned long init_nr = nr;
 	static uint32_t last_pool_id = 0;
 	uint32_t pool_id = last_pool_id;
@@ -1100,6 +1137,13 @@ retry:
 	goto retry;
 }
 
+/* scan and free pages */
+static unsigned long ycache_shrinker_scan(struct shrinker *shrinker,
+					  struct shrink_control *sc)
+{
+	return ycache_shrink(sc->nr_to_scan);
+}
+
 static struct shrinker ycache_shrinker = {
     .count_objects = ycache_shrinker_count,
     .scan_objects = ycache_shrinker_scan,
@@ -1160,6 +1204,10 @@ static int __init ycache_debugfs_init(void)
 				&ycache_used_pages);
 	debugfs_create_atomic_t("total_pages", S_IRUGO, ycache_debugfs_root,
 				&ycache_total_pages);
+	debugfs_create_u64("pool_limit_hit", S_IRUGO, ycache_debugfs_root,
+			   &ycache_pool_limit_hit);
+	debugfs_create_u64("reject_reclaim_fail", S_IRUGO, ycache_debugfs_root,
+			   &ycache_reject_reclaim_fail);
 	debugfs_create_u64("ycache_entry_fail", S_IRUGO, ycache_debugfs_root,
 			   &ycache_yentry_fail);
 	debugfs_create_u64("page_entry_fail", S_IRUGO, ycache_debugfs_root,
