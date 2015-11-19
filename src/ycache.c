@@ -751,7 +751,7 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 	struct page_entry *page_entry;
 	struct rb_root *rbroot;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	BUG_ON(pampd == NULL);
 
 	ycache_entry = (struct ycache_entry *)pampd;
@@ -952,7 +952,7 @@ static void ycache_cleancache_flush_fs(int pool_id)
 {
 	struct tmem_pool *pool = NULL;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	if (unlikely(pool_id < 0))
 		return;
 
@@ -975,7 +975,7 @@ static int ycache_cleancache_init_fs(size_t pagesize)
 	struct tmem_pool *pool;
 	int pool_id = -1;
 
-	pr_debug("call %s()\n", __FUNCTION__);
+	// pr_debug("call %s()\n", __FUNCTION__);
 	BUG_ON(sizeof(struct cleancache_filekey) != sizeof(u64[3]));
 	BUG_ON(pagesize != PAGE_SIZE);
 
@@ -1027,8 +1027,7 @@ static struct cleancache_ops ycache_cleancache_ops = {
 static unsigned long ycache_shrinker_count(struct shrinker *shrinker,
 					   struct shrink_control *sc)
 {
-	pr_debug("call %s() nr:%lu\n", __FUNCTION__,
-		 (unsigned long)atomic_read(&ycache_used_pages));
+	// pr_debug("call %s() nr:%lu\n", __FUNCTION__,(unsigned long)atomic_read(&ycache_used_pages));
 	return (unsigned long)atomic_read(&ycache_used_pages);
 }
 
@@ -1051,8 +1050,7 @@ static unsigned long ycache_shrink(unsigned long nr)
 	int empty_pool_nr = 0;
 	bool is_last_pool;
 
-	pr_debug("call %s() last_pool_id:%u nr:%lu\n", __FUNCTION__,
-		 last_pool_id, nr);
+	// pr_debug("call %s() last_pool_id:%u nr:%lu\n", __FUNCTION__,last_pool_id, nr);
 
 	spin_lock(&shrinker_lock);
 	/* set freeing to true to reject all puts because we don't want to
@@ -1142,7 +1140,7 @@ retry:
 		spin_lock(&shrinker_lock);
 		freeing = false;
 		spin_unlock(&shrinker_lock);
-		pr_debug("end %s() init-nr:%lu\n", __FUNCTION__, init_nr - nr);
+		// pr_debug("end %s() init-nr:%lu\n", __FUNCTION__, init_nr - nr);
 		return init_nr - nr;
 	}
 	/* exit the loop because can't find enough page_entry with the
