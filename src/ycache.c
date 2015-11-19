@@ -1057,7 +1057,13 @@ static unsigned long ycache_shrink(unsigned long nr)
 	spin_lock(&shrinker_lock);
 	/* set freeing to true to reject all puts because we don't want to
 	   undo our efforts to free memory */
-	freeing = true;
+	if (freeing == false)
+		freeing = true;
+	else {
+		spin_unlock(&shrinker_lock);
+		return 0;
+	}
+	spin_unlock(&shrinker_lock);
 retry:
 	while (nr > 0) {
 		if (unlikely(pool_id == last_pool_id))
@@ -1133,6 +1139,7 @@ retry:
 	}
 	/* exit the loop because freeing is done or all pools are empty*/
 	if (nr == 0 || empty_pool_nr >= MAX_POOLS) {
+		spin_lock(&shrinker_lock);
 		freeing = false;
 		spin_unlock(&shrinker_lock);
 		pr_debug("end %s() init-nr:%lu\n", __FUNCTION__, init_nr - nr);
@@ -1146,7 +1153,6 @@ retry:
 	}
 
 	/* BUG if execution comes here */
-	spin_unlock(&shrinker_lock);
 	BUG();
 }
 
