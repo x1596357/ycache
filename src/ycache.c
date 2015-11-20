@@ -1101,6 +1101,9 @@ retry:
 			/* If this page_entry has page_nr <= least_page_nr
 			   then it should be freed or least_page_nr reach
 			   PAGE_NR_THRESHOLD then all page_nr should be freed */
+			BUG_ON(ycache_entry==NULL);
+			BUG_ON(ycache_entry->page_entry==NULL);
+
 			if (likely(ycache_entry->page_entry->page_nr <=
 				       least_page_nr ||
 				   least_page_nr >= PAGE_NR_THRESHOLD)) {
@@ -1108,6 +1111,8 @@ retry:
 			}
 		}
 
+		BUG_ON(ycache_entry==NULL);
+		BUG_ON(ycache_entry->page_entry==NULL);
 		/* Fail to find one in this list, should try next pool. */
 		if (unlikely(ycache_entry->page_entry->page_nr >
 				 least_page_nr &&
