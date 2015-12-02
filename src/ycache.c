@@ -301,6 +301,7 @@ static int page_to_hash(const void *src, u8 *result)
 	}
 
 	// desc.flags = CRYPTO_TFM_REQ_MAY_SLEEP;
+	desc.flags = 0;
 	ret = crypto_hash_init(&desc);
 	if (unlikely(ret))
 		goto out;
