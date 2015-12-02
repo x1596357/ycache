@@ -300,7 +300,7 @@ static int page_to_hash(const void *src, u8 *result)
 		goto out;
 	}
 
-	desc.flags = CRYPTO_TFM_REQ_MAY_SLEEP;
+	// desc.flags = CRYPTO_TFM_REQ_MAY_SLEEP;
 	ret = crypto_hash_init(&desc);
 	if (unlikely(ret))
 		goto out;
@@ -531,10 +531,10 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 	ycache_entry->index = index;
 
 	page = (struct page *)data;
-	/* calculating MD5 may sleep, thus have to use kmap */
-	src = kmap(page);
+	/* calculating MD5 */
+	src = kmap_atomic(page);
 	page_to_hash(src, hash);
-	kunmap(page);
+	kunmap_atomic(src);
 
 	rbroot = get_rbroot(hash);
 	spin_lock(&ycache_host.lock);
