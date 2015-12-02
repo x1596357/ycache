@@ -48,7 +48,7 @@
 #define MAX_POOLS 256
 #define MAX_PAGE_RBTREES MAX_POOLS
 #define MAX_ENTRY_LISTS MAX_POOLS
-#define PAGE_NR_THRESHOLD 10
+#define PAGE_NR_THRESHOLD 4
 /* Use MD5 as hash function for now */
 #define YCACHE_HASH_FUNC "md5"
 #define HASH_DIGEST_SIZE MD5_DIGEST_SIZE
@@ -76,7 +76,6 @@ static u64 ycache_hash_fail;
 static u64 ycache_hash_collision;
 /* Counters for debugging */
 static u64 ycache_failed_get_free_pages;
-static u64 ycache_failed_alloc;
 static u64 ycache_put_to_flush;
 /* Useful stats not collected by cleancache */
 static u64 ycache_flush_total;
@@ -85,10 +84,10 @@ static u64 ycache_flobj_total;
 static u64 ycache_flobj_found;
 static u64 ycache_failed_puts;
 /* tmem statistics */
-static atomic_t ycache_curr_obj_count = ATOMIC_INIT(0);
-static u64 ycache_curr_obj_count_max;
-static atomic_t ycache_curr_objnode_count = ATOMIC_INIT(0);
-static u64 ycache_curr_objnode_count_max;
+static atomic_t ycache_obj_count = ATOMIC_INIT(0);
+static atomic_t ycache_objnode_count = ATOMIC_INIT(0);
+static u64 ycache_objnode_fail;
+static u64 ycache_obj_fail;
 
 #ifdef CONFIG_CLEANCACHE
 
@@ -420,23 +419,9 @@ static void ycache_put_pool(struct tmem_pool *pool)
 	atomic_dec(&pool->refcount);
 }
 
-static struct kmem_cache *ycache_objnode_cache;
-
-static int __init ycache_objnode_cache_create(void)
-{
-	// pr_debug("call %s()\n", __FUNCTION__);
-	ycache_objnode_cache = KMEM_CACHE(tmem_objnode, 0);
-	return ycache_objnode_cache == NULL;
-}
-
-static void __init ycache_objnode_cache_destroy(void)
-{
-	// pr_debug("call %s()\n", __FUNCTION__);
-	kmem_cache_destroy(ycache_objnode_cache);
-}
+/* Tmem host ops for allocating objs and objnodes */
 
 static struct kmem_cache *ycache_obj_cache;
-
 static int __init ycache_obj_cache_create(void)
 {
 	// pr_debug("call %s()\n", __FUNCTION__);
@@ -444,123 +429,76 @@ static int __init ycache_obj_cache_create(void)
 	return ycache_obj_cache == NULL;
 }
 
-__attribute__((unused)) static void __init ycache_obj_cache_destroy(void)
+static void __init ycache_obj_cache_destroy(void)
 {
 	// pr_debug("call %s()\n", __FUNCTION__);
 	kmem_cache_destroy(ycache_obj_cache);
 }
 
-/* to avoid some memory allocation recursion (e.g. due to direct reclaim) */
-struct ycache_preload {
-	struct tmem_obj *obj;
-	int nr;
-	struct tmem_objnode *objnodes[OBJNODE_TREE_MAX_PATH];
-};
-
-static DEFINE_PER_CPU(struct ycache_preload, ycache_preloads) = {
-    0,
-};
-
-static int ycache_do_preload(gfp_t gfp)
-{
-	struct ycache_preload *kp;
-	struct tmem_obj *obj;
-	struct tmem_objnode *objnode;
-	int ret = -ENOMEM;
-
-	// pr_debug("call %s()\n", __FUNCTION__);
-	if (unlikely(ycache_objnode_cache == NULL))
-		goto out;
-	if (unlikely(ycache_obj_cache == NULL))
-		goto out;
-
-	kp = this_cpu_ptr(&ycache_preloads);
-
-	if (kp->obj == NULL) {
-		obj = kmem_cache_alloc(ycache_obj_cache, gfp);
-		if (unlikely(obj == NULL)) {
-			ycache_failed_alloc++;
-			goto out;
-		}
-		kp->obj = obj;
-	}
-
-	while (kp->nr < ARRAY_SIZE(kp->objnodes)) {
-		objnode = kmem_cache_alloc(ycache_objnode_cache, gfp);
-		if (unlikely(objnode == NULL)) {
-			ycache_failed_alloc++;
-			goto out;
-		}
-		kp->objnodes[kp->nr++] = objnode;
-	}
-
-	ret = 0;
-out:
-	return ret;
-}
-
-/* ycache implementation for tmem host ops */
-
-static struct tmem_objnode *ycache_objnode_alloc(struct tmem_pool *pool)
-{
-	struct tmem_objnode *objnode = NULL;
-	unsigned long count;
-	struct ycache_preload *kp;
-
-	// pr_debug("call %s()\n", __FUNCTION__);
-	kp = this_cpu_ptr(&ycache_preloads);
-	if (kp->nr <= 0)
-		goto out;
-	objnode = kp->objnodes[kp->nr - 1];
-	BUG_ON(objnode == NULL);
-	kp->objnodes[kp->nr - 1] = NULL;
-	kp->nr--;
-	count = atomic_inc_return(&ycache_curr_objnode_count);
-	if (count > ycache_curr_objnode_count_max)
-		ycache_curr_objnode_count_max = count;
-out:
-	return objnode;
-}
-
-static void ycache_objnode_free(struct tmem_objnode *objnode,
-				struct tmem_pool *pool)
-{
-	// pr_debug("call %s()\n", __FUNCTION__);
-	atomic_dec(&ycache_curr_objnode_count);
-	BUG_ON(atomic_read(&ycache_curr_objnode_count) < 0);
-	kmem_cache_free(ycache_objnode_cache, objnode);
-}
-
-static struct tmem_obj *ycache_obj_alloc(struct tmem_pool *pool)
+static struct tmem_obj *ycache_obj_cache_alloc(struct tmem_pool *pool)
 {
 	struct tmem_obj *obj = NULL;
-	unsigned long count;
-	struct ycache_preload *kp;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
-	kp = this_cpu_ptr(&ycache_preloads);
-	obj = kp->obj;
-	BUG_ON(obj == NULL);
-	kp->obj = NULL;
-	count = atomic_inc_return(&ycache_curr_obj_count);
-	if (count > ycache_curr_obj_count_max)
-		ycache_curr_obj_count_max = count;
-	return obj;
+	obj = kmem_cache_alloc(ycache_obj_cache, YCACHE_GFP_MASK);
+	if (unlikely(obj == NULL)) {
+		ycache_obj_fail++;
+		return NULL;
+	} else {
+		atomic_inc(&ycache_obj_count);
+		return obj;
+	}
 }
 
-static void ycache_obj_free(struct tmem_obj *obj, struct tmem_pool *pool)
+static void ycache_obj_cache_free(struct tmem_obj *obj, struct tmem_pool *pool)
 {
 	// pr_debug("call %s()\n", __FUNCTION__);
-	atomic_dec(&ycache_curr_obj_count);
-	BUG_ON(atomic_read(&ycache_curr_obj_count) < 0);
+	atomic_dec(&ycache_obj_count);
 	kmem_cache_free(ycache_obj_cache, obj);
 }
 
+static struct kmem_cache *ycache_objnode_cache;
+static int __init ycache_objnode_cache_create(void)
+{
+	// pr_debug("call %s()\n", __FUNCTION__);
+	ycache_objnode_cache = KMEM_CACHE(tmem_objnode, 0);
+	return ycache_objnode_cache == NULL;
+}
+
+__attribute__((unused)) static void __init ycache_objnode_cache_destroy(void)
+{
+	// pr_debug("call %s()\n", __FUNCTION__);
+	kmem_cache_destroy(ycache_objnode_cache);
+}
+
+static struct tmem_objnode *ycache_objnode_cache_alloc(struct tmem_pool *pool)
+{
+	struct tmem_objnode *objnode = NULL;
+
+	// pr_debug("call %s()\n", __FUNCTION__);
+	objnode = kmem_cache_alloc(ycache_objnode_cache, YCACHE_GFP_MASK);
+	if (unlikely(objnode == NULL)) {
+		ycache_objnode_fail++;
+		return NULL;
+	} else {
+		atomic_inc(&ycache_objnode_count);
+		return objnode;
+	}
+}
+
+static void ycache_objnode_cache_free(struct tmem_objnode *objnode,
+				      struct tmem_pool *pool)
+{
+	// pr_debug("call %s()\n", __FUNCTION__);
+	atomic_dec(&ycache_objnode_count);
+	kmem_cache_free(ycache_objnode_cache, objnode);
+}
+
 static struct tmem_hostops ycache_hostops = {
-    .obj_alloc = ycache_obj_alloc,
-    .obj_free = ycache_obj_free,
-    .objnode_alloc = ycache_objnode_alloc,
-    .objnode_free = ycache_objnode_free,
+    .obj_alloc = ycache_obj_cache_alloc,
+    .obj_free = ycache_obj_cache_free,
+    .objnode_alloc = ycache_objnode_cache_alloc,
+    .objnode_free = ycache_objnode_cache_free,
 };
 
 /* use tmem to manage the relation of page address and ycache_entry.
@@ -827,48 +765,45 @@ static void ycache_cleancache_put_page(int pool_id,
 	// Shrinker is being called, reject all puts
 	if (unlikely(freeing == true)) {
 		ycache_failed_puts++;
-		return;
+		goto fail;
 	}
 
 	/* reclaim space if needed */
 	if (ycache_is_full()) {
 		ycache_pool_limit_hit++;
+		/* try to free one */
 		if (ycache_shrink(1) != 1) {
 			ycache_reject_reclaim_fail++;
 			ycache_failed_puts++;
-			return;
+			goto fail;
 		}
 	}
 
 	if (unlikely(tmp_index != index)) {
 		ycache_failed_puts++;
-		return;
+		goto fail;
 	}
 
 	pool = ycache_get_pool_by_id(pool_id);
-	if (unlikely(pool == NULL)) {
-		ycache_failed_puts++;
-		return;
-	}
-
-	// local_irq_save(flags);
-	preempt_disable();
-	if (likely(ycache_do_preload(YCACHE_GFP_MASK) == 0)) {
+	if (likely(pool != NULL)) {
 		ret = tmem_put(pool, oid, index, (char *)(page), PAGE_SIZE, 0,
 			       is_ephemeral(pool));
 		if (unlikely(ret < 0)) {
 			ycache_failed_puts++;
+			ycache_put_pool(pool);
+			goto fail;
 		}
-	} else {
-		ycache_put_to_flush++;
-		if (atomic_read(&pool->obj_count) > 0)
-			/* the put fails whether the flush succeeds or
-			 * not */
-			(void)tmem_flush_page(pool, oid, index);
 	}
-	preempt_enable();
-	// local_irq_restore(flags);
 	ycache_put_pool(pool);
+	return;
+fail:
+	/* flush if put failed */
+	pool = ycache_get_pool_by_id(pool_id);
+	if (likely(pool != NULL && atomic_read(&pool->obj_count) > 0)) {
+		(void)tmem_flush_page(pool, oid, index);
+	}
+	ycache_put_pool(pool);
+	ycache_put_to_flush++;
 }
 
 static int ycache_cleancache_get_page(int pool_id,
@@ -1027,7 +962,8 @@ static struct cleancache_ops ycache_cleancache_ops = {
 static unsigned long ycache_shrinker_count(struct shrinker *shrinker,
 					   struct shrink_control *sc)
 {
-	// pr_debug("call %s() nr:%lu\n", __FUNCTION__,(unsigned long)atomic_read(&ycache_used_pages));
+	// pr_debug("call %s() nr:%lu\n", __FUNCTION__,(unsigned
+	// long)atomic_read(&ycache_used_pages));
 	return (unsigned long)atomic_read(&ycache_used_pages);
 }
 
@@ -1050,7 +986,8 @@ static unsigned long ycache_shrink(unsigned long nr)
 	int empty_pool_nr = 0;
 	bool is_last_pool;
 
-	// pr_debug("call %s() last_pool_id:%u nr:%lu\n", __FUNCTION__,last_pool_id, nr);
+	// pr_debug("call %s() last_pool_id:%u nr:%lu\n",
+	// __FUNCTION__,last_pool_id, nr);
 
 	spin_lock(&shrinker_lock);
 	/* set freeing to true to reject all puts because we don't want to
@@ -1101,8 +1038,8 @@ retry:
 			/* If this page_entry has page_nr <= least_page_nr
 			   then it should be freed or least_page_nr reach
 			   PAGE_NR_THRESHOLD then all page_nr should be freed */
-			BUG_ON(ycache_entry==NULL);
-			BUG_ON(ycache_entry->page_entry==NULL);
+			BUG_ON(ycache_entry == NULL);
+			BUG_ON(ycache_entry->page_entry == NULL);
 
 			if (likely(ycache_entry->page_entry->page_nr <=
 				       least_page_nr ||
@@ -1111,8 +1048,8 @@ retry:
 			}
 		}
 
-		BUG_ON(ycache_entry==NULL);
-		BUG_ON(ycache_entry->page_entry==NULL);
+		BUG_ON(ycache_entry == NULL);
+		BUG_ON(ycache_entry->page_entry == NULL);
 		/* Fail to find one in this list, should try next pool. */
 		if (unlikely(ycache_entry->page_entry->page_nr >
 				 least_page_nr &&
@@ -1145,7 +1082,8 @@ retry:
 		spin_lock(&shrinker_lock);
 		freeing = false;
 		spin_unlock(&shrinker_lock);
-		// pr_debug("end %s() init-nr:%lu\n", __FUNCTION__, init_nr - nr);
+		// pr_debug("end %s() init-nr:%lu\n", __FUNCTION__, init_nr -
+		// nr);
 		return init_nr - nr;
 	}
 	/* exit the loop because can't find enough page_entry with the
@@ -1171,36 +1109,6 @@ static struct shrinker ycache_shrinker = {
     .scan_objects = ycache_shrinker_scan,
     .seeks = DEFAULT_SEEKS,
 };
-
-static int ycache_cpu_notifier(struct notifier_block *nb, unsigned long action,
-			       void *pcpu)
-{
-	int cpu = (long)pcpu;
-	struct ycache_preload *kp;
-
-	switch (action) {
-	case CPU_DEAD:
-	case CPU_UP_CANCELED:
-		kp = &per_cpu(ycache_preloads, cpu);
-		while (kp->nr) {
-			kmem_cache_free(ycache_objnode_cache,
-					kp->objnodes[kp->nr - 1]);
-			kp->objnodes[kp->nr - 1] = NULL;
-			kp->nr--;
-		}
-		if (kp->obj) {
-			kmem_cache_free(ycache_obj_cache, kp->obj);
-			kp->obj = NULL;
-		}
-		break;
-	default:
-		break;
-	}
-	return NOTIFY_OK;
-}
-
-static struct notifier_block ycache_cpu_notifier_block = {
-    .notifier_call = ycache_cpu_notifier};
 
 static __init void init_ycache_host(void)
 {
@@ -1271,19 +1179,16 @@ static int __init ycache_debugfs_init(void)
 			   &ycache_failed_puts);
 	debugfs_create_u64("failed_get_free_pages", S_IRUGO,
 			   ycache_debugfs_root, &ycache_failed_get_free_pages);
-	debugfs_create_u64("failed_alloc", S_IRUGO, ycache_debugfs_root,
-			   &ycache_failed_alloc);
 	debugfs_create_u64("put_to_flush", S_IRUGO, ycache_debugfs_root,
 			   &ycache_put_to_flush);
-	debugfs_create_atomic_t("curr_obj_count", S_IRUGO, ycache_debugfs_root,
-				&ycache_curr_obj_count);
-	debugfs_create_u64("curr_obj_count_max", S_IRUGO, ycache_debugfs_root,
-			   &ycache_curr_obj_count_max);
-	debugfs_create_atomic_t("curr_objnode_count", S_IRUGO,
-				ycache_debugfs_root,
-				&ycache_curr_objnode_count);
-	debugfs_create_u64("curr_objnode_count_max", S_IRUGO,
-			   ycache_debugfs_root, &ycache_curr_objnode_count_max);
+	debugfs_create_atomic_t("obj_count", S_IRUGO, ycache_debugfs_root,
+				&ycache_obj_count);
+	debugfs_create_u64("obj_fail", S_IRUGO, ycache_debugfs_root,
+			   &ycache_obj_fail);
+	debugfs_create_atomic_t("objnode_count", S_IRUGO, ycache_debugfs_root,
+				&ycache_objnode_count);
+	debugfs_create_u64("objnode_fail", S_IRUGO, ycache_debugfs_root,
+			   &ycache_objnode_fail);
 
 	return 0;
 }
@@ -1312,17 +1217,13 @@ static int __init ycache_init(void)
 		pr_err("page_entry_cache creation failed\n");
 		goto entry_cache_fail;
 	}
-	if (unlikely(ycache_objnode_cache_create())) {
-		pr_err("ycache_objnode_cache creation failed\n");
-		goto ycache_objnode_cache_fail;
-	}
 	if (unlikely(ycache_obj_cache_create())) {
 		pr_err("ycache_obj_cache creation failed\n");
 		goto ycache_obj_cache_fail;
 	}
-	if (unlikely(register_cpu_notifier(&ycache_cpu_notifier_block))) {
-		pr_err("can't register cpu notifier\n");
-		/* do nothing since we can still function without it*/
+	if (unlikely(ycache_objnode_cache_create())) {
+		pr_err("ycache_objnode_cache creation failed\n");
+		goto ycache_objnode_cache_fail;
 	}
 	tmem_register_hostops(&ycache_hostops);
 	tmem_register_pamops(&ycache_pamops);
@@ -1339,9 +1240,9 @@ static int __init ycache_init(void)
 	return 0;
 
 #ifdef CONFIG_CLEANCACHE
-ycache_obj_cache_fail:
-	ycache_objnode_cache_destroy();
 ycache_objnode_cache_fail:
+	ycache_obj_cache_destroy();
+ycache_obj_cache_fail:
 	page_entry_cache_destroy();
 entry_cache_fail:
 	ycache_entry_cache_destroy();
