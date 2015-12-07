@@ -106,6 +106,12 @@ static bool ycache_is_full(void)
 	       atomic_read(&ycache_used_pages);
 }
 
+static atomic_t shrinking_count = ATOMIC_INIT(0);
+static bool ycache_is_shrinking(void)
+{
+	return atomic_read(&shrinking_count) != 0;
+}
+
 /*********************************
 * data structures
 **********************************/
@@ -747,8 +753,6 @@ static struct tmem_pamops ycache_pamops = {
 /* These are "cleancache" which is used as a second-chance cache for clean
  * page cache pages;
  */
-static bool freeing = false;
-
 /* Forward reference */
 static unsigned long ycache_shrink(unsigned long);
 
@@ -758,13 +762,13 @@ static void ycache_cleancache_put_page(int pool_id,
 {
 	struct tmem_pool *pool;
 	struct tmem_oid *oid = (struct tmem_oid *)&key;
-	u32 tmp_index = (u32)index;
+	uint32_t tmp_index = (uint32_t)index;
 	int ret = -1;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
 
 	// Shrinker is being called, reject all puts
-	if (unlikely(freeing == true)) {
+	if (unlikely(ycache_is_shrinking())) {
 		ycache_failed_puts++;
 		goto fail;
 	}
@@ -773,7 +777,7 @@ static void ycache_cleancache_put_page(int pool_id,
 	if (ycache_is_full()) {
 		ycache_pool_limit_hit++;
 		/* try to free one */
-		if (ycache_shrink(1) != 1) {
+		if (ycache_shrink(1) < 1) {
 			ycache_reject_reclaim_fail++;
 			ycache_failed_puts++;
 			goto fail;
@@ -813,7 +817,7 @@ static int ycache_cleancache_get_page(int pool_id,
 {
 	struct tmem_pool *pool;
 	struct tmem_oid *oid = (struct tmem_oid *)&key;
-	u32 tmp_index = (u32)index;
+	uint32_t tmp_index = (uint32_t)index;
 	size_t size = PAGE_SIZE;
 	int ret = -1;
 	// unsigned long flags;
@@ -841,7 +845,7 @@ static void ycache_cleancache_flush_page(int pool_id,
 {
 	struct tmem_pool *pool;
 	struct tmem_oid *oid = (struct tmem_oid *)&key;
-	u32 tmp_index = (u32)index;
+	uint32_t tmp_index = (uint32_t)index;
 	int ret = -1;
 	// unsigned long flags;
 
@@ -959,143 +963,62 @@ static struct cleancache_ops ycache_cleancache_ops = {
     .init_shared_fs = ycache_cleancache_init_shared_fs,
     .init_fs = ycache_cleancache_init_fs};
 
-/* return the pages count that can be freed */
+/* return the ycache_total_pages count as object count */
 static unsigned long ycache_shrinker_count(struct shrinker *shrinker,
 					   struct shrink_control *sc)
 {
 	// pr_debug("call %s() nr:%lu\n", __FUNCTION__,(unsigned
-	// long)atomic_read(&ycache_used_pages));
-	return (unsigned long)atomic_read(&ycache_used_pages);
+	// long)atomic_read(&ycache_total_pages));
+	return (unsigned long)atomic_read(&ycache_total_pages);
 }
 
 /* ycache shrinker  */
-/* Now we make ycache_shrink become single threaded to be safe
-   TODO: make it SMP-safe*/
-static spinlock_t shrinker_lock;
-
 static unsigned long ycache_shrink(unsigned long nr)
 {
-	unsigned long init_nr = nr;
-	static uint32_t last_pool_id = 0;
-	/* try to find a page entry in next pool */
-	uint32_t pool_id = (last_pool_id + 1) % MAX_POOLS;
+	unsigned long freed_nr = 0;
+	unsigned long tmp_freed_nr;
+	int pool_id;
 	struct tmem_pool *pool;
 	struct ycache_entry *ycache_entry;
-	/* the least page number a page_entry has to have to be free
-	   we try to free page_entry with lesser page_nr first */
-	int least_page_nr = 1;
-	int empty_pool_nr = 0;
-	bool is_last_pool;
+	struct tmem_oid oid;
+	uint32_t index;
 
-	// pr_debug("call %s() last_pool_id:%u nr:%lu\n",
-	// __FUNCTION__,last_pool_id, nr);
-
-	spin_lock(&shrinker_lock);
-	/* set freeing to true to reject all puts because we don't want to
-	   undo our efforts to free memory */
-	if (freeing == false)
-		freeing = true;
-	else {
-		spin_unlock(&shrinker_lock);
-		return 0;
-	}
-	spin_unlock(&shrinker_lock);
-retry:
-	while (nr > 0) {
-		if (unlikely(pool_id == last_pool_id))
-			is_last_pool = true;
-		else
-			is_last_pool = false;
-
-		spin_lock(&ycache_host.lock);
-		// Check if list is empty
-		if (list_empty(&ycache_entry_lists[pool_id])) {
-			spin_unlock(&ycache_host.lock);
-
-			empty_pool_nr++;
-			/* It is the last pool, don't retry any more. Or
-			   all pools are empty, should exit the loop */
-			if (unlikely(is_last_pool ||
-				     empty_pool_nr >= MAX_POOLS))
-				break;
-			else {
-				/* this list is empty, find in next one */
-				pool_id = (pool_id + 1) % MAX_POOLS;
-				continue;
-			}
-		}
-
-		/* Find pool success, reset empty pool counter */
-		empty_pool_nr = 0;
-		pool = ycache_get_pool_by_id(pool_id);
-		BUG_ON(pool == NULL);
-		/* Iterate through the list to find the first ycache_entry
-		   whose corresponding page_entry has page_nr <= least_page_nr,
-		   or least_page_nr >= PAGE_NR_THRESHOLD, which means to free
-		   all page_entrys */
-		list_for_each_entry(ycache_entry, &ycache_entry_lists[pool_id],
-				    list)
+	pr_debug("call %s() nr:%lu\n", __FUNCTION__, nr);
+	atomic_inc(&shrinking_count);
+	while (freed_nr < nr) {
+		tmp_freed_nr = freed_nr;
+		/* Try to free the first entry in each pool */
+		idr_for_each_entry(&ycache_host.tmem_pools, pool, pool_id)
 		{
-			/* If this page_entry has page_nr <= least_page_nr
-			   then it should be freed or least_page_nr reach
-			   PAGE_NR_THRESHOLD then all page_nr should be freed */
-			BUG_ON(ycache_entry == NULL);
-			BUG_ON(ycache_entry->page_entry == NULL);
+			BUG_ON(pool == NULL);
+			atomic_inc(&pool->refcount);
 
-			if (likely(ycache_entry->page_entry->page_nr <=
-				       least_page_nr ||
-				   least_page_nr >= PAGE_NR_THRESHOLD)) {
-				break;
-			}
-		}
-
-		BUG_ON(ycache_entry == NULL);
-		BUG_ON(ycache_entry->page_entry == NULL);
-		/* Fail to find one in this list, should try next pool. */
-		if (unlikely(ycache_entry->page_entry->page_nr >
-				 least_page_nr &&
-			     least_page_nr < PAGE_NR_THRESHOLD)) {
+			spin_lock(&ycache_host.lock);
+			ycache_entry = list_first_entry_or_null(
+			    &ycache_entry_lists[pool_id], struct ycache_entry,
+			    list);
 			spin_unlock(&ycache_host.lock);
-			ycache_put_pool(pool);
-			/* It is the last pool now, don't retry any more */
-			if (is_last_pool)
-				break;
-			else {
-				pool_id = (pool_id + 1) % MAX_POOLS;
+
+			if (ycache_entry == NULL) {
+				ycache_put_pool(pool);
 				continue;
+			} else {
+				oid = ycache_entry->oid,
+				index = ycache_entry->index;
 			}
+			tmem_flush_page(pool, &oid, index);
+			ycache_put_pool(pool);
+			freed_nr++;
 		}
-
-		/* actually freed one page */
-		if (ycache_entry->page_entry->page_nr == 1)
-			nr--;
-		spin_unlock(&ycache_host.lock);
-		/* page_entry found, free it */
-		tmem_flush_page(pool, &ycache_entry->oid, ycache_entry->index);
-		ycache_put_pool(pool);
-
-		/* Try to spread page freeing across all pools */
-		last_pool_id = pool_id;
-		pool_id = (pool_id + 1) % MAX_POOLS;
-	}
-	/* exit the loop because freeing is done or all pools are empty*/
-	if (nr == 0 || empty_pool_nr >= MAX_POOLS) {
-		spin_lock(&shrinker_lock);
-		freeing = false;
-		spin_unlock(&shrinker_lock);
-		// pr_debug("end %s() init-nr:%lu\n", __FUNCTION__, init_nr -
-		// nr);
-		return init_nr - nr;
-	}
-	/* exit the loop because can't find enough page_entry with the
-	   least page_nr, needs to increase least_page_nr. */
-	if (is_last_pool) {
-		least_page_nr++;
-		goto retry;
+		/* freed nothing in all pools, all pools are empty */
+		if (freed_nr == tmp_freed_nr) {
+			break;
+		}
 	}
 
-	/* BUG if execution comes here */
-	BUG();
+	pr_debug("freed %lu entry\n", freed_nr);
+	atomic_dec(&shrinking_count);
+	return freed_nr;
 }
 
 /* scan and free pages */
@@ -1128,8 +1051,6 @@ static __init void init_ycache_host(void)
 	for (i = 0; i < MAX_ENTRY_LISTS; i++) {
 		INIT_LIST_HEAD(&ycache_entry_lists[i]);
 	}
-	/* Init shrinker lock */
-	spin_lock_init(&shrinker_lock);
 }
 
 #endif
@@ -1257,4 +1178,4 @@ late_initcall(ycache_init);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Eric Zhang <gd.yi@139.com>");
-MODULE_DESCRIPTION("Deduplicate pages evicted from page cache");
+MODULE_DESCRIPTION("Deduplicate pages evicted from page cache and cache them");
