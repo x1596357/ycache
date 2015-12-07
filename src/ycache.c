@@ -24,6 +24,7 @@
 #include <linux/cpu.h>
 #include <linux/spinlock.h>
 #include <linux/highmem.h>
+#include <linux/swap.h>
 #include <linux/list.h>
 #include <linux/slab.h>
 #include <linux/types.h>
@@ -94,16 +95,16 @@ static u64 ycache_obj_fail;
 /*********************************
 * helpers
 **********************************/
-/* The maximum percentage of memory that the pool can occupy
- * TODO: should use free pages available instead
+/* Reserved part of memory that the pool shouldn't occupy.
+ * reserved 100MiB by default.
  */
-static unsigned int ycache_max_pool_percent = 20;
-module_param_named(max_pool_percent, ycache_max_pool_percent, uint, 0644);
+static unsigned int ycache_reserved_pages_count = 100 * 1024 * 1024 / PAGE_SIZE;
+module_param_named(reserved_pages_count, ycache_reserved_pages_count, uint,
+		   0644);
 
 static bool ycache_is_full(void)
 {
-	return totalram_pages * ycache_max_pool_percent / 100 <
-	       atomic_read(&ycache_used_pages);
+	return nr_free_pages() < ycache_reserved_pages_count;
 }
 
 static atomic_t shrinking_count = ATOMIC_INIT(0);
@@ -983,7 +984,7 @@ static unsigned long ycache_shrink(unsigned long nr)
 	struct tmem_oid oid;
 	uint32_t index;
 
-	pr_debug("call %s() nr:%lu\n", __FUNCTION__, nr);
+	// pr_debug("call %s() nr:%lu\n", __FUNCTION__, nr);
 	atomic_inc(&shrinking_count);
 	while (freed_nr < nr) {
 		tmp_freed_nr = freed_nr;
@@ -1016,7 +1017,7 @@ static unsigned long ycache_shrink(unsigned long nr)
 		}
 	}
 
-	pr_debug("freed %lu entry\n", freed_nr);
+	// pr_debug("freed %lu entry\n", freed_nr);
 	atomic_dec(&shrinking_count);
 	return freed_nr;
 }
