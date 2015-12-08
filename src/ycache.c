@@ -42,6 +42,8 @@
 #ifdef CONFIG_CLEANCACHE
 #include <linux/cleancache.h>
 #include <linux/shrinker.h>
+#else
+#error "This module is useless without cleancache"
 #endif
 
 #define YCACHE_GFP_MASK                                                        \
