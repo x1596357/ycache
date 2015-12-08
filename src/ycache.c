@@ -1093,11 +1093,25 @@ static int __init ycache_debugfs_init(void)
 	ycache_debugfs_root = debugfs_create_dir("ycache", NULL);
 	if (!ycache_debugfs_root)
 		return -ENOMEM;
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 11, 0)
 	debugfs_create_atomic_t("used_pages", S_IRUGO, ycache_debugfs_root,
 				&ycache_used_pages);
 	debugfs_create_atomic_t("total_pages", S_IRUGO, ycache_debugfs_root,
 				&ycache_total_pages);
+	debugfs_create_atomic_t("obj_count", S_IRUGO, ycache_debugfs_root,
+				&ycache_obj_count);
+	debugfs_create_atomic_t("objnode_count", S_IRUGO, ycache_debugfs_root,
+				&ycache_objnode_count);
+#else
+	debugfs_create_u32("used_pages", S_IRUGO, ycache_debugfs_root,
+			   (u32 *)&ycache_used_pages);
+	debugfs_create_u32("total_pages", S_IRUGO, ycache_debugfs_root,
+			   (u32 *)&ycache_total_pages);
+	debugfs_create_u32("obj_count", S_IRUGO, ycache_debugfs_root,
+			   (u32 *)&ycache_obj_count);
+	debugfs_create_u32("objnode_count", S_IRUGO, ycache_debugfs_root,
+			   (u32 *)&ycache_objnode_count);
+#endif
 	debugfs_create_u64("pool_limit_hit", S_IRUGO, ycache_debugfs_root,
 			   &ycache_pool_limit_hit);
 	debugfs_create_u64("reject_reclaim_fail", S_IRUGO, ycache_debugfs_root,
@@ -1124,12 +1138,8 @@ static int __init ycache_debugfs_init(void)
 			   ycache_debugfs_root, &ycache_failed_get_free_pages);
 	debugfs_create_u64("put_to_flush", S_IRUGO, ycache_debugfs_root,
 			   &ycache_put_to_flush);
-	debugfs_create_atomic_t("obj_count", S_IRUGO, ycache_debugfs_root,
-				&ycache_obj_count);
 	debugfs_create_u64("obj_fail", S_IRUGO, ycache_debugfs_root,
 			   &ycache_obj_fail);
-	debugfs_create_atomic_t("objnode_count", S_IRUGO, ycache_debugfs_root,
-				&ycache_objnode_count);
 	debugfs_create_u64("objnode_fail", S_IRUGO, ycache_debugfs_root,
 			   &ycache_objnode_fail);
 
