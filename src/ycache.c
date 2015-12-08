@@ -926,9 +926,28 @@ static int ycache_cleancache_init_fs(size_t pagesize)
 		goto out;
 	}
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
 	idr_preload(GFP_KERNEL);
 	pool_id =
 	    idr_alloc(&ycache_host.tmem_pools, pool, 0, MAX_POOLS, GFP_KERNEL);
+	idr_preload_end();
+#else
+	int ret;
+	do {
+		ret = idr_pre_get(&ycache_host.tmem_pools, GFP_KERNEL);
+		if (ret != 1) {
+			kfree(pool);
+			pr_info("get pool_id failed: out of memory\n");
+			goto out;
+		}
+		ret = idr_get_new(&ycache_host.tmem_pools, pool, &pool_id);
+	} while (ret == -EAGAIN);
+	if (ret) {
+		pr_info("get pool_id failed: error %d\n", ret);
+		kfree(pool);
+		goto out;
+	}
+#endif
 
 	if (unlikely(pool_id < 0)) {
 		pr_warn("pool creation failed: error %d\n", pool_id);
