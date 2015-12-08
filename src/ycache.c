@@ -926,6 +926,7 @@ static int ycache_cleancache_init_fs(size_t pagesize)
 		goto out;
 	}
 
+	idr_preload(GFP_KERNEL);
 	pool_id =
 	    idr_alloc(&ycache_host.tmem_pools, pool, 0, MAX_POOLS, GFP_KERNEL);
 
