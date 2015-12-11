@@ -39,7 +39,7 @@ int main(int argc, char const *argv[]) {
     if (includeZeros == 0) {
       cout << "Zeros :not included" << endl;
     } else {
-      cout << "Zeros : included" << endl;
+      cout << "Zeros :included" << endl;
     }
   }
 
@@ -60,8 +60,10 @@ int main(int argc, char const *argv[]) {
   delete[] block;
 
   unsigned long unsetSize = unset.size();
-  cout << "Unique block :" << unsetSize << endl;
-  double duplicateRate = 1 - (long double)unsetSize / blockCount;
+  cout << "Total blocks :" << blockCount << endl;
+  cout << "Unique blocks :" << unsetSize << endl;
+  cout << "Duplicate blocks :" << blockCount - unsetSize << endl;
+  long double duplicateRate = 1 - (long double)unsetSize / blockCount;
   cout << "Duplicate rate :" << duplicateRate * 100 << '%' << endl;
   return 0;
 }
