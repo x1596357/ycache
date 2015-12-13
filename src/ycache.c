@@ -55,6 +55,7 @@
 /* Use MD5 as hash function for now */
 #define YCACHE_HASH_FUNC "md5"
 #define HASH_DIGEST_SIZE MD5_DIGEST_SIZE
+#define STORE_HASH_SIZE HASH_DIGEST_SIZE / 2
 
 /* Some of the statistics below are not protected from concurrent access for
  * performance reasons so they may not be a 100% accurate.  However,
@@ -98,9 +99,9 @@ static u64 ycache_obj_fail;
 * helpers
 **********************************/
 /* Reserved part of memory that the pool shouldn't occupy.
- * reserved 100MiB by default.
+ * reserved 20MiB by default.
  */
-static unsigned int ycache_reserved_pages_count = 100 * 1024 * 1024 / PAGE_SIZE;
+static unsigned int ycache_reserved_pages_count = 20 * 1024 * 1024 / PAGE_SIZE;
 module_param_named(reserved_pages_count, ycache_reserved_pages_count, uint,
 		   0644);
 
@@ -141,7 +142,7 @@ static inline struct rb_root *get_rbroot(u8 *hash) { return &rbroots[hash[0]]; }
 struct page_entry {
 	struct page *page;
 	struct rb_node rbnode;
-	u8 hash[HASH_DIGEST_SIZE];
+	u8 hash[STORE_HASH_SIZE];
 	int page_nr;
 };
 
@@ -215,7 +216,7 @@ static struct page_entry *page_rb_search(struct rb_root *root, u8 *hash)
 	// pr_debug("call %s()\n", __FUNCTION__);
 	while (node) {
 		entry = rb_entry(node, struct page_entry, rbnode);
-		result = memcmp(entry->hash, hash, HASH_DIGEST_SIZE);
+		result = memcmp(entry->hash, hash, STORE_HASH_SIZE);
 		if (result > 0)
 			node = node->rb_left;
 		else if (result < 0)
@@ -242,7 +243,7 @@ static int page_rb_insert(struct rb_root *root, struct page_entry *entry,
 	while (*link) {
 		parent = *link;
 		tmp_entry = rb_entry(parent, struct page_entry, rbnode);
-		result = memcmp(tmp_entry->hash, entry->hash, HASH_DIGEST_SIZE);
+		result = memcmp(tmp_entry->hash, entry->hash, STORE_HASH_SIZE);
 		if (result > 0)
 			link = &(*link)->rb_left;
 		else if (result < 0)
@@ -546,9 +547,9 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 	page_to_hash(src, hash);
 	kunmap_atomic(src);
 
-	rbroot = get_rbroot(hash);
+	rbroot = get_rbroot(&hash[STORE_HASH_SIZE]);
 	spin_lock(&ycache_host.lock);
-	page_entry = page_rb_search(rbroot, hash);
+	page_entry = page_rb_search(rbroot, &hash[STORE_HASH_SIZE]);
 	/* hash not exists */
 	if (likely(page_entry == NULL)) {
 		spin_unlock(&ycache_host.lock);
@@ -564,12 +565,15 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 		kunmap_atomic(dst);
 		kunmap_atomic(src);
 		/* copy hash values */
-		memcpy(page_entry->hash, hash, HASH_DIGEST_SIZE);
+		memcpy(page_entry->hash, &hash[STORE_HASH_SIZE],
+		       STORE_HASH_SIZE);
 
 		/* set page_entry before holding lock */
 		ycache_entry->page_entry = page_entry;
 
 		spin_lock(&ycache_host.lock);
+		/* TODO: maybe we can cache some node in rbtree from page search
+		  to reduce rbtree search overhead */
 		result = page_rb_insert(rbroot, page_entry, &dupentry);
 		// this rarely happens, it has to be taken cared of (reject)
 		// should it happen
