@@ -1010,7 +1010,12 @@ static unsigned long ycache_shrink(unsigned long nr)
 	struct tmem_oid oid;
 	uint32_t index;
 
-	// pr_debug("call %s() nr:%lu\n", __FUNCTION__, nr);
+// pr_debug("call %s() nr:%lu\n", __FUNCTION__, nr);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 12, 0)
+	if (freed_nr == 0) {
+		return atomic_read(&ycache_total_pages);
+	}
+#endif
 	atomic_inc(&shrinking_count);
 	while (freed_nr < nr) {
 		tmp_freed_nr = freed_nr;
@@ -1045,7 +1050,11 @@ static unsigned long ycache_shrink(unsigned long nr)
 
 	// pr_debug("freed %lu entry\n", freed_nr);
 	atomic_dec(&shrinking_count);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 12, 0)
 	return freed_nr;
+#else
+	return atomic_read(&ycache_total_pages);
+#endif
 }
 
 /* scan and free pages */
@@ -1056,8 +1065,12 @@ static unsigned long ycache_shrinker_scan(struct shrinker *shrinker,
 }
 
 static struct shrinker ycache_shrinker = {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 12, 0)
     .count_objects = ycache_shrinker_count,
     .scan_objects = ycache_shrinker_scan,
+#else
+    .shrink = ycache_shrinker_scan;
+#endif
     .seeks = DEFAULT_SEEKS,
 };
 
