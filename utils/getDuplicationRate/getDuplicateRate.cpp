@@ -20,7 +20,8 @@ bool isAllZeros(char *buf, int size) {
 // ./getDuplicateRate dump 4096 0
 int main(int argc, char const *argv[]) {
   if (argc != 4) {
-    cout << "Usage:" << argv[0] << " FILE BLOCKSIZE" << endl;
+    cout << "Usage:" << argv[0]
+         << " FILE_BLOCKSIZE(1~INT_MAX) INCLUDE_ZEROS(0~1)" << endl;
     cout << "For example:" << endl;
     cout << argv[0] << " dump 4096 0" << endl;
   }
