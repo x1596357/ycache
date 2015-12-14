@@ -1069,7 +1069,7 @@ static struct shrinker ycache_shrinker = {
     .count_objects = ycache_shrinker_count,
     .scan_objects = ycache_shrinker_scan,
 #else
-    .shrink = ycache_shrinker_scan;
+    .shrink = ycache_shrinker_scan,
 #endif
     .seeks = DEFAULT_SEEKS,
 };
