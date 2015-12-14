@@ -74,7 +74,10 @@ int main(int argc, char const *argv[])
 		}
 		drop_caches.close();
 		// Checking cpu usage needs 1 second
-		this_thread::sleep_for(std::chrono::seconds(interval - 1));
+		int remainInterval = interval - 1;
+		if (remainInterval > 0)
+			this_thread::sleep_for(
+			    std::chrono::seconds(remainInterval));
 	}
 
 	return 0;
