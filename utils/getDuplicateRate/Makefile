@@ -27,4 +27,4 @@ $(TARGET): $(OBJS)
 	$(CXX) $(CFLAGS) -o $(TARGET) $(OBJS)
 
 clean:
-	rm -f $(OBJS) getDuplicateRate.exe *.o
+	rm -f $(OBJS) $(TARGET) *.o
