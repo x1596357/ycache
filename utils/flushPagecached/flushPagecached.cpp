@@ -7,54 +7,74 @@
 using namespace std;
 
 bool isCpuUnderBound(int cpuBound);
+bool isMemUnderBound(int memBound);
 
 // This program flush page cache every argv[1] seconds
-// if CPU usage is under argv[2]%
+// if CPU usage is under argv[2]% and free memory(totally free) is below
+// argv[3] kbytes
 // For example:
-// ./flushPagecached 30 50 &
+// ./flushPagecached 30 50 40960 &
 // if no arguments follow the program, by default, this program
-// flush pagecache every 30 seconds if CPU usage is under 50%
+// flush pagecache every 30 seconds if CPU usage is under 50% and free memory
+// is below 40960 KiB
 int main(int argc, char const *argv[])
 {
 	int interval = 30;
 	int cpuBound = 50;
-	if (argc != 1 && argc != 3) {
+	int memBound = 40960;
+
+	const char *drop_caches_path = "/proc/sys/vm/drop_caches";
+	ofstream drop_caches;
+
+	if (argc != 1 && argc != 4) {
 		cout << "Usage:" << argv[0]
-		     << " INTERVAL(1~INT_MAX) CPU_BOUND(0~100)" << endl;
+		     << " INTERVAL(1~INT_MAX) CPU_BOUND(0~100) "
+			"MEM_BOUND(1~INT_MAX, in kbytes)"
+		     << endl;
 		cout << "For example:" << endl;
-		cout << "./" << argv[0] << " 30 50 &" << endl;
+		cout << "./" << argv[0] << " 30 50 40960 &" << endl;
+		return -1;
 	}
 
-	if (argc == 3) {
+	if (argc == 4) {
 		interval = atoi(argv[1]);
 		cpuBound = atoi(argv[2]);
+		memBound = atoi(argv[3]);
 
 		if (interval < 1) {
 			cout << "Invalid interval: use default 30s" << endl;
 		}
-		cout << "flush interval:" << interval << "s" << endl;
 		if (cpuBound < 0 || cpuBound > 100) {
 			cout << "Invalid cpu upper bound: use default 50" << '%'
 			     << endl;
 		}
-		cout << "cpu upper bound:" << cpuBound << '%' << endl;
+		if (memBound < 1) {
+			cout << "Invalid memBound: use default 40960 KiB"
+			     << endl;
+		}
 	}
 
-	const char *file_path = "/proc/sys/vm/drop_caches";
-	ofstream drop_caches_f(file_path);
-	if (!drop_caches_f) {
-		cerr << "Unable to open " << file_path << endl;
-		cerr << "Check if you have permission, you should have root"
-		     << endl;
-		exit(-1);
-	}
+	cout << "Flush interval:" << interval << "s" << endl;
+	cout << "CPU upper bound:" << cpuBound << '%' << endl;
+	cout << "Free memory bound:" << memBound << "KiB" << endl << endl;
 
 	while (true) {
-		drop_caches_f.seekg(0, ios::beg);
-		if (isCpuUnderBound(cpuBound))
-			drop_caches_f << 1 << endl;
+		drop_caches.open(drop_caches_path);
+		if (!drop_caches) {
+			cerr << "Unable to open " << drop_caches_path << endl;
+			cerr << "Check if you have permission, you should have "
+				"root"
+			     << endl;
+			return -2;
+		}
+		if (isCpuUnderBound(cpuBound) && isMemUnderBound(memBound)) {
+			drop_caches << 1 << endl;
+			cout << "Condition statisfied, dropping caches ..."
+			     << endl;
+		}
+		drop_caches.close();
 		// Checking cpu usage needs 1 second
-		std::this_thread::sleep_for(std::chrono::seconds(interval - 1));
+		this_thread::sleep_for(std::chrono::seconds(interval - 1));
 	}
 
 	return 0;
@@ -76,7 +96,7 @@ bool isCpuUnderBound(int cpuBound)
 	//     << idle << ' ' << iowait << ' ' << irq << ' ' << softirq << endl;
 	cpuTotal = user + nice + sys + idle + iowait + irq + softirq;
 	cpuIdle = idle;
-	std::this_thread::sleep_for(std::chrono::seconds(1));
+	this_thread::sleep_for(std::chrono::seconds(1));
 	stat.seekg(0, ios::beg);
 	stat >> cpu_name >> user >> nice >> sys >> idle >> iowait >> irq >>
 	    softirq;
@@ -86,9 +106,29 @@ bool isCpuUnderBound(int cpuBound)
 	cpuIdle = idle - cpuIdle;
 
 	long long int cpuUsage = 100 * (cpuTotal - cpuIdle) / cpuTotal;
-	cout << "CPU usage is:" << cpuUsage << '%' << endl;
+	cout << "CPU usage:" << cpuUsage << '%' << endl;
 
 	if (cpuUsage <= cpuBound)
+		return true;
+	else
+		return false;
+}
+
+// Check if free memory(as in not used by anything, even page cache)
+bool isMemUnderBound(int memBound)
+{
+	char tmp_string[128];
+	long int freeKb;
+
+	const char *proc_meminfo = "/proc/meminfo";
+	ifstream meminfo(proc_meminfo);
+	/* this is used to consume the first line */
+	meminfo >> tmp_string >> freeKb >> tmp_string;
+	/* get actual free memory in kbytes */
+	meminfo >> tmp_string >> freeKb;
+	cout << "Free memory:" << freeKb << "KiB" << endl;
+
+	if (freeKb <= memBound)
 		return true;
 	else
 		return false;
