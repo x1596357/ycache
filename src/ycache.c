@@ -65,10 +65,6 @@
 static atomic_t ycache_used_pages = ATOMIC_INIT(0);
 /* Total pages got in the module */
 static atomic_t ycache_total_pages = ATOMIC_INIT(0);
-/* Pool limit was hit (see ycache_max_pool_percent) */
-static u64 ycache_pool_limit_hit;
-/* Store failed due to a reclaim failure after pool limit was reached */
-static u64 ycache_reject_reclaim_fail;
 /* Store failed because the ycache_entry could not be allocated */
 static u64 ycache_yentry_fail;
 /* Store failed because the page_entry could not be allocated */
@@ -81,10 +77,10 @@ static u64 ycache_hash_collision;
 static u64 ycache_failed_get_free_pages;
 static u64 ycache_put_to_flush;
 /* Useful stats not collected by cleancache */
-static u64 ycache_flush_total;
-static u64 ycache_flush_found;
-static u64 ycache_flobj_total;
-static u64 ycache_flobj_found;
+static u64 ycache_flush_page_total;
+static u64 ycache_flush_page_found;
+static u64 ycache_flush_obj_total;
+static u64 ycache_flush_obj_found;
 static u64 ycache_failed_puts;
 /* tmem statistics */
 static atomic_t ycache_obj_count = ATOMIC_INIT(0);
@@ -97,18 +93,6 @@ static u64 ycache_obj_fail;
 /*********************************
 * helpers
 **********************************/
-/* Reserved part of memory that the pool shouldn't occupy.
- * reserved 20MiB by default.
- */
-static unsigned int ycache_reserved_pages_count = 20 * 1024 * 1024 / PAGE_SIZE;
-module_param_named(reserved_pages_count, ycache_reserved_pages_count, uint,
-		   0644);
-
-static bool ycache_is_full(void)
-{
-	return nr_free_pages() < ycache_reserved_pages_count;
-}
-
 static atomic_t shrinking_count = ATOMIC_INIT(0);
 static bool ycache_is_shrinking(void)
 {
@@ -778,17 +762,6 @@ static void ycache_cleancache_put_page(int pool_id,
 		goto fail;
 	}
 
-	/* reclaim space if needed */
-	if (ycache_is_full()) {
-		ycache_pool_limit_hit++;
-		/* try to free one */
-		if (ycache_shrink(1) < 1) {
-			ycache_reject_reclaim_fail++;
-			ycache_failed_puts++;
-			goto fail;
-		}
-	}
-
 	if (unlikely(tmp_index != index)) {
 		ycache_failed_puts++;
 		goto fail;
@@ -858,7 +831,7 @@ static void ycache_cleancache_flush_page(int pool_id,
 	if (unlikely(tmp_index != index))
 		return;
 
-	ycache_flush_total++;
+	ycache_flush_page_total++;
 	// local_irq_save(flags);
 	pool = ycache_get_pool_by_id(pool_id);
 	if (likely(pool != NULL)) {
@@ -868,7 +841,7 @@ static void ycache_cleancache_flush_page(int pool_id,
 	}
 	// local_irq_restore(flags);
 	if (ret >= 0)
-		ycache_flush_found++;
+		ycache_flush_page_found++;
 }
 
 static void ycache_cleancache_flush_inode(int pool_id,
@@ -880,7 +853,7 @@ static void ycache_cleancache_flush_inode(int pool_id,
 	// unsigned long flags;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
-	ycache_flobj_total++;
+	ycache_flush_obj_total++;
 	// local_irq_save(flags);
 	pool = ycache_get_pool_by_id(pool_id);
 	if (likely(pool != NULL)) {
@@ -890,7 +863,7 @@ static void ycache_cleancache_flush_inode(int pool_id,
 	}
 	// local_irq_restore(flags);
 	if (ret >= 0)
-		ycache_flobj_found++;
+		ycache_flush_obj_found++;
 }
 
 static void ycache_cleancache_flush_fs(int pool_id)
@@ -1129,10 +1102,6 @@ static int __init ycache_debugfs_init(void)
 	debugfs_create_u32("objnode_count", S_IRUGO, ycache_debugfs_root,
 			   (u32 *)&ycache_objnode_count);
 #endif
-	debugfs_create_u64("pool_limit_hit", S_IRUGO, ycache_debugfs_root,
-			   &ycache_pool_limit_hit);
-	debugfs_create_u64("reject_reclaim_fail", S_IRUGO, ycache_debugfs_root,
-			   &ycache_reject_reclaim_fail);
 	debugfs_create_u64("ycache_entry_fail", S_IRUGO, ycache_debugfs_root,
 			   &ycache_yentry_fail);
 	debugfs_create_u64("page_entry_fail", S_IRUGO, ycache_debugfs_root,
@@ -1141,14 +1110,14 @@ static int __init ycache_debugfs_init(void)
 			   &ycache_hash_fail);
 	debugfs_create_u64("hash_collision", S_IRUGO, ycache_debugfs_root,
 			   &ycache_hash_collision);
-	debugfs_create_u64("flush_total", S_IRUGO, ycache_debugfs_root,
-			   &ycache_flush_total);
-	debugfs_create_u64("flush_found", S_IRUGO, ycache_debugfs_root,
-			   &ycache_flush_found);
-	debugfs_create_u64("flobj_total", S_IRUGO, ycache_debugfs_root,
-			   &ycache_flobj_total);
-	debugfs_create_u64("flobj_found", S_IRUGO, ycache_debugfs_root,
-			   &ycache_flobj_found);
+	debugfs_create_u64("flush_page_total", S_IRUGO, ycache_debugfs_root,
+			   &ycache_flush_page_total);
+	debugfs_create_u64("flush_page_found", S_IRUGO, ycache_debugfs_root,
+			   &ycache_flush_page_found);
+	debugfs_create_u64("flush_obj_total", S_IRUGO, ycache_debugfs_root,
+			   &ycache_flush_obj_total);
+	debugfs_create_u64("flush_obj_found", S_IRUGO, ycache_debugfs_root,
+			   &ycache_flush_obj_found);
 	debugfs_create_u64("failed_puts", S_IRUGO, ycache_debugfs_root,
 			   &ycache_failed_puts);
 	debugfs_create_u64("failed_get_free_pages", S_IRUGO,
