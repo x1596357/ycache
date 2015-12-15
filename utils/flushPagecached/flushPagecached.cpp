@@ -1,4 +1,6 @@
 #include <iostream>
+#include <string>
+#include <sstream>
 #include <fstream>
 #include <cstdlib>
 #include <chrono>
@@ -7,21 +9,21 @@
 using namespace std;
 
 bool isCpuUnderBound(int cpuBound);
-bool isMemUnderBound(int memBound);
+bool isMemUnderBound(long long memBound);
 
 // This program flush page cache every argv[1] seconds
-// if CPU usage is under argv[2]% and free memory(totally free) is below
+// if CPU usage is under argv[2]% and free memory(totally free)+buffer is below
 // argv[3] kbytes
 // For example:
 // ./flushPagecached 30 50 40960 &
 // if no arguments follow the program, by default, this program
 // flush pagecache every 30 seconds if CPU usage is under 50% and free memory
-// is below 40960 KiB
+// +buffer is below 40960 KiB
 int main(int argc, char const *argv[])
 {
 	int interval = 30;
 	int cpuBound = 50;
-	int memBound = 40960;
+	long long memBound = 40960;
 
 	const char *drop_caches_path = "/proc/sys/vm/drop_caches";
 	ofstream drop_caches;
@@ -29,7 +31,7 @@ int main(int argc, char const *argv[])
 	if (argc != 1 && argc != 4) {
 		cout << "Usage:" << argv[0]
 		     << " INTERVAL(1~INT_MAX) CPU_BOUND(0~100) "
-			"MEM_BOUND(1~INT_MAX, in kbytes)"
+			"MEM_BOUND(1~LLONG_MAX, in kbytes)"
 		     << endl;
 		cout << "For example:" << endl;
 		cout << "./" << argv[0] << " 30 50 40960 &" << endl;
@@ -39,7 +41,7 @@ int main(int argc, char const *argv[])
 	if (argc == 4) {
 		interval = atoi(argv[1]);
 		cpuBound = atoi(argv[2]);
-		memBound = atoi(argv[3]);
+		memBound = atoll(argv[3]);
 
 		if (interval < 1) {
 			cout << "Invalid interval: use default 30s" << endl;
@@ -56,7 +58,7 @@ int main(int argc, char const *argv[])
 
 	cout << "Flush interval:" << interval << "s" << endl;
 	cout << "CPU upper bound:" << cpuBound << '%' << endl;
-	cout << "Free memory bound:" << memBound << "KiB" << endl << endl;
+	cout << "Memory bound:" << memBound << "KiB" << endl << endl;
 
 	while (true) {
 		drop_caches.open(drop_caches_path);
@@ -87,9 +89,9 @@ int main(int argc, char const *argv[])
 bool isCpuUnderBound(int cpuBound)
 {
 	char cpu_name[128];
-	long int user, nice, sys, idle, iowait, irq, softirq;
-	long int cpuIdle;
-	long long int cpuTotal;
+	long long user, nice, sys, idle, iowait, irq, softirq;
+	long long cpuIdle;
+	long long cpuTotal;
 
 	const char *proc_stat = "/proc/stat";
 	ifstream stat(proc_stat);
@@ -108,7 +110,7 @@ bool isCpuUnderBound(int cpuBound)
 	cpuTotal = user + nice + sys + idle + iowait + irq + softirq - cpuTotal;
 	cpuIdle = idle - cpuIdle;
 
-	long long int cpuUsage = 100 * (cpuTotal - cpuIdle) / cpuTotal;
+	long long cpuUsage = 100 * (cpuTotal - cpuIdle) / cpuTotal;
 	cout << "CPU usage:" << cpuUsage << '%' << endl;
 
 	if (cpuUsage <= cpuBound)
@@ -118,20 +120,32 @@ bool isCpuUnderBound(int cpuBound)
 }
 
 // Check if free memory(as in not used by anything, even page cache)
-bool isMemUnderBound(int memBound)
+// plus buffer is below memBound
+bool isMemUnderBound(long long memBound)
 {
+	string line;
 	char tmp_string[128];
-	long int freeKb;
+	long long freeKb;
+	long long bufferKb;
 
 	const char *proc_meminfo = "/proc/meminfo";
 	ifstream meminfo(proc_meminfo);
 	/* this is used to consume the first line */
-	meminfo >> tmp_string >> freeKb >> tmp_string;
+	getline(meminfo, line);
 	/* get actual free memory in kbytes */
-	meminfo >> tmp_string >> freeKb;
+	getline(meminfo, line);
+	istringstream issFreeKb(line);
+	issFreeKb >> tmp_string >> freeKb;
 	cout << "Free memory:" << freeKb << "KiB" << endl;
+	/* this is used to consume the third line */
+	getline(meminfo, line);
+	/* get actual buffer in kbytes  */
+	getline(meminfo, line);
+	istringstream issBufferKb(line);
+	issBufferKb >> tmp_string >> bufferKb;
+	cout << "Buffer:" << bufferKb << "KiB" << endl << endl;
 
-	if (freeKb <= memBound)
+	if (freeKb + bufferKb < memBound)
 		return true;
 	else
 		return false;
