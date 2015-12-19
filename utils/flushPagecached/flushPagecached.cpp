@@ -99,7 +99,8 @@ bool isCpuUnderBound(int cpuBound)
 	    softirq;
 	// cout << cpu_name << ' ' << user << ' ' << nice << ' ' << sys << ' '
 	//     << idle << ' ' << iowait << ' ' << irq << ' ' << softirq << endl;
-	cpuTotal = user + nice + sys + idle + iowait + irq + softirq;
+	/* No iowait */
+	cpuTotal = user + nice + sys + idle + irq + softirq;
 	cpuIdle = idle;
 	this_thread::sleep_for(std::chrono::seconds(1));
 	stat.seekg(0, ios::beg);
@@ -107,7 +108,7 @@ bool isCpuUnderBound(int cpuBound)
 	    softirq;
 	// cout << cpu_name << ' ' << user << ' ' << nice << ' ' << sys << ' '
 	//     << idle << ' ' << iowait << ' ' << irq << ' ' << softirq << endl;
-	cpuTotal = user + nice + sys + idle + iowait + irq + softirq - cpuTotal;
+	cpuTotal = user + nice + sys + idle + irq + softirq - cpuTotal;
 	cpuIdle = idle - cpuIdle;
 
 	long long cpuUsage = 100 * (cpuTotal - cpuIdle) / cpuTotal;
