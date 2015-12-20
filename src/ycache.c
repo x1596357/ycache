@@ -1082,11 +1082,11 @@ static int __init ycache_debugfs_init(void)
 	debugfs_create_u32("objnode_count", S_IRUGO, ycache_debugfs_root,
 			   (u32 *)&ycache_objnode_count);
 #endif
-	debugfs_create_u64("ycache_entry_fail", S_IRUGO, ycache_debugfs_root,
+	debugfs_create_u64("fail_ycache_entry", S_IRUGO, ycache_debugfs_root,
 			   &ycache_yentry_fail);
-	debugfs_create_u64("page_entry_fail", S_IRUGO, ycache_debugfs_root,
+	debugfs_create_u64("fail_page_entry", S_IRUGO, ycache_debugfs_root,
 			   &ycache_pentry_fail);
-	debugfs_create_u64("hash_fail", S_IRUGO, ycache_debugfs_root,
+	debugfs_create_u64("fail_hash", S_IRUGO, ycache_debugfs_root,
 			   &ycache_hash_fail);
 	debugfs_create_u64("hash_collision", S_IRUGO, ycache_debugfs_root,
 			   &ycache_hash_collision);
@@ -1094,15 +1094,15 @@ static int __init ycache_debugfs_init(void)
 			   &ycache_flush_page_found);
 	debugfs_create_u64("flush_obj_found", S_IRUGO, ycache_debugfs_root,
 			   &ycache_flush_obj_found);
-	debugfs_create_u64("failed_puts", S_IRUGO, ycache_debugfs_root,
+	debugfs_create_u64("fail_puts", S_IRUGO, ycache_debugfs_root,
 			   &ycache_failed_puts);
-	debugfs_create_u64("failed_get_free_pages", S_IRUGO,
+	debugfs_create_u64("fail_get_free_page", S_IRUGO,
 			   ycache_debugfs_root, &ycache_failed_get_free_pages);
 	debugfs_create_u64("put_to_flush", S_IRUGO, ycache_debugfs_root,
 			   &ycache_put_to_flush);
-	debugfs_create_u64("obj_fail", S_IRUGO, ycache_debugfs_root,
+	debugfs_create_u64("fail_get_obj", S_IRUGO, ycache_debugfs_root,
 			   &ycache_obj_fail);
-	debugfs_create_u64("objnode_fail", S_IRUGO, ycache_debugfs_root,
+	debugfs_create_u64("fail_get_objnode", S_IRUGO, ycache_debugfs_root,
 			   &ycache_objnode_fail);
 
 	return 0;
