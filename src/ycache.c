@@ -48,8 +48,7 @@
 
 #define YCACHE_GFP_MASK                                                        \
 	(__GFP_FS | __GFP_NORETRY | __GFP_NOWARN | __GFP_NOMEMALLOC)
-#define MAX_POOLS 256
-#define MAX_PAGE_RBTREES MAX_POOLS
+#define MAX_PAGE_RBTREES 256
 /* Use MD5 as hash function for now */
 #define YCACHE_HASH_FUNC "md5"
 #define HASH_DIGEST_SIZE MD5_DIGEST_SIZE
@@ -895,7 +894,7 @@ static int ycache_cleancache_init_fs(size_t pagesize)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
 	idr_preload(GFP_KERNEL);
 	pool_id =
-	    idr_alloc(&ycache_host.tmem_pools, pool, 0, MAX_POOLS, GFP_KERNEL);
+	    idr_alloc(&ycache_host.tmem_pools, pool, 0, 0, GFP_KERNEL);
 	idr_preload_end();
 #else
 	int ret;
