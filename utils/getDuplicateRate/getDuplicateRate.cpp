@@ -24,6 +24,7 @@ int main(int argc, char const *argv[]) {
          << " FILE BLOCKSIZE(1~INT_MAX) INCLUDE_ZEROS(0~1)" << endl;
     cout << "For example:" << endl;
     cout << argv[0] << " dump 4096 0" << endl;
+    return -1;
   }
 
   ifstream file(argv[1], ios::binary | ios::ate);
