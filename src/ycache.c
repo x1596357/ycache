@@ -22,6 +22,8 @@
 
 #include <linux/module.h>
 #include <linux/cpu.h>
+#include <linux/kthread.h>
+#include <linux/completion.h>
 #include <linux/spinlock.h>
 #include <linux/highmem.h>
 #include <linux/swap.h>
@@ -53,8 +55,8 @@
 #define YCACHE_HASH_FUNC "md5"
 #define HASH_DIGEST_SIZE MD5_DIGEST_SIZE
 
-/* Some of the statistics below are not protected from concurrent access for
- * performance reasons so they may not be a 100% accurate.  However,
+/* Some of the statistics below are not protected from concurrent access
+ * for performance reasons so they may not be a 100% accurate.  However,
  * they do provide useful information on roughly how many times a
  * certain event is occurring.
 */
@@ -82,6 +84,43 @@ static atomic_t ycache_obj_count = ATOMIC_INIT(0);
 static atomic_t ycache_objnode_count = ATOMIC_INIT(0);
 static u64 ycache_objnode_fail;
 static u64 ycache_obj_fail;
+
+static int THREADS_COUNT = 4;
+#define WORKS_COUNT (THREADS_COUNT * 2)
+
+enum work_types { PUT, GET };
+
+/* represent a put or a get*/
+struct ycache_work {
+	int pool_id;
+	struct cleancache_filekey key;
+	pgoff_t index;
+	struct page *page;
+	enum work_types type;
+	struct list_head node;
+};
+
+/* each thread has a queue, and an extra queue to store free works */
+struct ycache_workqueue {
+	spinlock_t lock;
+	struct list_head head;
+};
+
+/* array of ycache workqueue */
+static struct ycache_workqueue *ycache_workqueues;
+/* queue for storing empty ycache_work to be used */
+static struct ycache_workqueue free_workqueue;
+/* task_struct for threads */
+static struct task_struct **threads;
+/* completion for getting return value from
+   ycache_cleancache_do_get_page() */
+static struct completion *ret_completions;
+/* completion for retriving return value in ycache_cleancache_get_page() */
+static struct completion *ret_done_completions;
+/* return values for ycache_cleancache_do_get_page from threads */
+static int *ret_values;
+/* semaphore for free_workqueue */
+static struct semaphore free_workqueue_semaphore;
 
 /*********************************
 * helpers
@@ -120,7 +159,7 @@ struct page_entry {
 	struct rb_node rbnode;
 	u8 hash[HASH_DIGEST_SIZE];
 	int page_nr;
-};
+} __attribute__((packed));
 
 /*********************************
 * page_entry functions
@@ -239,7 +278,7 @@ static void page_rb_erase(struct rb_root *root, struct page_entry *entry)
 	// pr_debug("call %s()\n", __FUNCTION__);
 	if (likely(!RB_EMPTY_NODE(&entry->rbnode))) {
 		rb_erase(&entry->rbnode, root);
-		//RB_CLEAR_NODE(&entry->rbnode);
+		// RB_CLEAR_NODE(&entry->rbnode);
 	}
 }
 
@@ -333,7 +372,7 @@ struct ycache_entry {
 	uint32_t index;
 	struct page_entry *page_entry;
 	struct list_head list;
-};
+} __attribute__((packed));
 
 /*********************************
 * ycache_entry functions
@@ -363,7 +402,7 @@ static struct ycache_entry *ycache_entry_cache_alloc(gfp_t gfp)
 		ycache_yentry_fail++;
 		return NULL;
 	}
-	//INIT_LIST_HEAD(&entry->list);
+	// INIT_LIST_HEAD(&entry->list);
 	atomic_inc(&ycache_total_pages);
 	return entry;
 }
@@ -739,6 +778,49 @@ static void ycache_cleancache_put_page(int pool_id,
 				       struct cleancache_filekey key,
 				       pgoff_t index, struct page *page)
 {
+	u8 *src, *dst;
+	int thread_id;
+	struct ycache_work *this_work;
+
+	down_interruptible(&free_workqueue_semaphore);
+	spin_lock(&free_workqueue.lock);
+	this_work =
+	    list_first_entry(&free_workqueue.head, struct ycache_work, node);
+	list_del(&this_work->node);
+	spin_unlock(&free_workqueue.lock);
+
+	this_work->pool_id = pool_id;
+	this_work->key = key;
+	this_work->index = index;
+	this_work->type = PUT;
+	this_work->page = alloc_page(YCACHE_GFP_MASK | __GFP_HIGHMEM);
+	if (unlikely(this_work->page == NULL)) {
+		spin_lock(&free_workqueue.lock);
+		list_add_tail(&this_work->node, &free_workqueue.head);
+		spin_unlock(&free_workqueue.lock);
+		up(&free_workqueue_semaphore);
+		return;
+	} else {
+		/* copy page */
+		src = kmap_atomic(page);
+		dst = kmap_atomic(this_work->page);
+		copy_page(dst, src);
+		kunmap_atomic(dst);
+		kunmap_atomic(src);
+
+		thread_id = index % THREADS_COUNT;
+		spin_lock(&ycache_workqueues[thread_id].lock);
+		list_add_tail(&this_work->node,
+			      &ycache_workqueues[thread_id].head);
+		spin_unlock(&ycache_workqueues[thread_id].lock);
+		wake_up_process(threads[thread_id]);
+	}
+}
+
+static void ycache_cleancache_do_put_page(int pool_id,
+					  struct cleancache_filekey key,
+					  pgoff_t index, struct page *page)
+{
 	struct tmem_pool *pool;
 	struct tmem_oid *oid = (struct tmem_oid *)&key;
 	uint32_t tmp_index = (uint32_t)index;
@@ -782,6 +864,48 @@ fail:
 static int ycache_cleancache_get_page(int pool_id,
 				      struct cleancache_filekey key,
 				      pgoff_t index, struct page *page)
+{
+	int thread_id;
+	struct ycache_work *this_work;
+	int ret;
+
+	down_interruptible(&free_workqueue_semaphore);
+	spin_lock(&free_workqueue.lock);
+	this_work =
+	    list_first_entry(&free_workqueue.head, struct ycache_work, node);
+	list_del(&this_work->node);
+	spin_unlock(&free_workqueue.lock);
+
+	this_work->pool_id = pool_id;
+	this_work->key = key;
+	this_work->index = index;
+	this_work->type = GET;
+	this_work->page = page;
+	if (unlikely(this_work->page == NULL)) {
+		spin_lock(&free_workqueue.lock);
+		list_add_tail(&this_work->node, &free_workqueue.head);
+		spin_unlock(&free_workqueue.lock);
+		up(&free_workqueue_semaphore);
+		BUG();
+	} else {
+		thread_id = index % THREADS_COUNT;
+		spin_lock(&ycache_workqueues[thread_id].lock);
+		list_add_tail(&this_work->node,
+			      &ycache_workqueues[thread_id].head);
+		spin_unlock(&ycache_workqueues[thread_id].lock);
+		wake_up_process(threads[thread_id]);
+	}
+
+	wait_for_completion(&ret_completions[thread_id]);
+	ret = ret_values[thread_id];
+	complete(&ret_done_completions[thread_id]);
+
+	return ret;
+}
+
+static int ycache_cleancache_do_get_page(int pool_id,
+					 struct cleancache_filekey key,
+					 pgoff_t index, struct page *page)
 {
 	struct tmem_pool *pool;
 	struct tmem_oid *oid = (struct tmem_oid *)&key;
@@ -893,8 +1017,7 @@ static int ycache_cleancache_init_fs(size_t pagesize)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
 	idr_preload(GFP_KERNEL);
-	pool_id =
-	    idr_alloc(&ycache_host.tmem_pools, pool, 0, 0, GFP_KERNEL);
+	pool_id = idr_alloc(&ycache_host.tmem_pools, pool, 0, 0, GFP_KERNEL);
 	idr_preload_end();
 #else
 	int ret;
@@ -979,25 +1102,25 @@ static unsigned long ycache_shrink(unsigned long nr)
 	while (freed_nr < nr) {
 		spin_lock(&ycache_host.lock);
 		ycache_entry = list_first_entry_or_null(
-			&ycache_entry_list, struct ycache_entry,list);
+		    &ycache_entry_list, struct ycache_entry, list);
 		if (unlikely(ycache_entry == NULL)) {
 			/* list is empty */
 			spin_unlock(&ycache_host.lock);
 			break;
 		} else {
-			pool_id=ycache_entry->pool_id;
+			pool_id = ycache_entry->pool_id;
 			oid = ycache_entry->oid;
 			index = ycache_entry->index;
 			spin_unlock(&ycache_host.lock);
 		}
-		
+
 		pool = ycache_get_pool_by_id(pool_id);
 		if (likely(pool != NULL)) {
 			if (likely(atomic_read(&pool->obj_count) > 0))
 				ret = tmem_flush_page(pool, &oid, index);
 			ycache_put_pool(pool);
 		}
-		if (likely(ret >= 0)){
+		if (likely(ret >= 0)) {
 			ycache_flush_page_found++;
 			freed_nr++;
 		}
@@ -1028,8 +1151,72 @@ static struct shrinker ycache_shrinker = {
     .seeks = DEFAULT_SEEKS,
 };
 
-static __init void init_ycache_host(void)
+/* ycache kernel threads to utilize SMP system */
+static int ycache_thread(void *data)
 {
+	static int thread_id;
+	struct ycache_workqueue *this_wq;
+	struct ycache_work *this_work;
+
+	thread_id = (int)data;
+	this_wq = &ycache_workqueues[thread_id];
+
+check_empty:
+	/* Code is constructed this way to avoid wake-up lost */
+	set_current_state(TASK_INTERRUPTIBLE);
+	spin_lock(&this_wq->lock);
+	this_work =
+	    list_first_entry_or_null(&this_wq->head, struct ycache_work, node);
+	if (this_work == NULL) {
+		spin_unlock(&this_wq->lock);
+		schedule();
+		spin_lock(&this_wq->lock);
+	}
+	set_current_state(TASK_RUNNING);
+	spin_unlock(&this_wq->lock);
+
+	/* Rest of the code ... */
+	switch (this_work->type) {
+	case PUT:
+		ycache_cleancache_do_put_page(this_work->pool_id,
+					      this_work->key, this_work->index,
+					      this_work->page);
+		break;
+	case GET:
+		wait_for_completion(&ret_done_completions[thread_id]);
+		ret_values[thread_id] = ycache_cleancache_do_get_page(
+		    this_work->pool_id, this_work->key, this_work->index,
+		    this_work->page);
+		complete(&ret_completions[thread_id]);
+		break;
+	default:
+		pr_err("this_work->type not exist\n");
+		BUG();
+	}
+
+	spin_lock(&this_wq->lock);
+	list_del(&this_work->node);
+	spin_unlock(&this_wq->lock);
+
+	if (this_work->type == PUT) {
+		__free_page(this_work->page);
+	}
+
+	spin_lock(&free_workqueue.lock);
+	list_add_tail(&this_work->node, &free_workqueue.head);
+	spin_unlock(&free_workqueue.lock);
+
+	up(&free_workqueue_semaphore);
+	pr_err("%d here", __LINE__);
+
+	goto check_empty;
+	/* we don't return, return written here to avoid compiler warning */
+	return 0;
+}
+
+static __init int do_ycache_init(void)
+{
+	struct ycache_work *works;
 	int i;
 	// pr_debug("call %s()\n", __FUNCTION__);
 
@@ -1041,8 +1228,93 @@ static __init void init_ycache_host(void)
 	for (i = 0; i < MAX_PAGE_RBTREES; i++) {
 		rbroots[i] = RB_ROOT;
 	}
-	/* Init free list*/
+	/* Init free list for ycache entry*/
 	INIT_LIST_HEAD(&ycache_entry_list);
+
+	/* Init thread related data structure*/
+	/* work queues for each thread */
+	ycache_workqueues = kmalloc(
+	    sizeof(struct ycache_workqueue) * THREADS_COUNT, GFP_KERNEL);
+	if (unlikely(ycache_workqueues == NULL)) {
+		return -ENOMEM;
+	} else {
+		for (i = 0; i < THREADS_COUNT; i++) {
+			spin_lock_init(&ycache_workqueues[i].lock);
+			INIT_LIST_HEAD(&ycache_workqueues[i].head);
+		}
+	}
+	/* work queue to hold free ycache works*/
+	spin_lock_init(&free_workqueue.lock);
+	INIT_LIST_HEAD(&free_workqueue.head);
+	/* semaphore for free_workqueue */
+	sema_init(&free_workqueue_semaphore, WORKS_COUNT);
+
+	/* ycache works for storing related information */
+	works = kmalloc(sizeof(struct ycache_work) * WORKS_COUNT, GFP_KERNEL);
+	if (unlikely(works == NULL)) {
+		goto works_fail;
+	} else {
+		spin_lock(&free_workqueue.lock);
+		for (i = 0; i < WORKS_COUNT; i++) {
+			list_add_tail(&works[i].node, &free_workqueue.head);
+		}
+		spin_unlock(&free_workqueue.lock);
+	}
+
+	/* comletion init */
+	ret_completions =
+	    kmalloc(sizeof(struct completion) * THREADS_COUNT, GFP_KERNEL);
+	if (unlikely(ret_completions == NULL)) {
+		goto ret_completions_fail;
+	} else {
+		for (i = 0; i < THREADS_COUNT; i++) {
+			init_completion(&ret_completions[i]);
+		}
+	}
+
+	ret_done_completions =
+	    kmalloc(sizeof(struct completion) * THREADS_COUNT, GFP_KERNEL);
+	if (unlikely(ret_done_completions == NULL)) {
+		goto ret_done_completions_fail;
+	} else {
+		for (i = 0; i < THREADS_COUNT; i++) {
+			init_completion(&ret_done_completions[i]);
+			complete(&ret_done_completions[i]);
+		}
+	}
+
+	/* return values for threads */
+	ret_values = kmalloc(sizeof(int) * THREADS_COUNT, GFP_KERNEL);
+	if (unlikely(ret_values == NULL)) {
+		goto ret_values_fail;
+	}
+
+	/* threads */
+	threads =
+	    kmalloc(sizeof(struct task_struct *) * THREADS_COUNT, GFP_KERNEL);
+	if (unlikely(threads == NULL)) {
+		goto threads_fail;
+	} else {
+		for (i = 0; i < THREADS_COUNT; i++) {
+			threads[i] = kthread_create(ycache_thread, (void *)i,
+						    "kycached/%d", i);
+			BUG_ON(IS_ERR(threads[i]));
+		}
+	}
+
+	return 0;
+
+threads_fail:
+	kfree(ret_values);
+ret_values_fail:
+	kfree(ret_done_completions);
+ret_done_completions_fail:
+	kfree(ret_completions);
+ret_completions_fail:
+	kfree(works);
+works_fail:
+	kfree(ycache_workqueues);
+	return -ENOMEM;
 }
 
 /*********************************
@@ -1095,8 +1367,8 @@ static int __init ycache_debugfs_init(void)
 			   &ycache_flush_obj_found);
 	debugfs_create_u64("fail_puts", S_IRUGO, ycache_debugfs_root,
 			   &ycache_failed_puts);
-	debugfs_create_u64("fail_get_free_page", S_IRUGO,
-			   ycache_debugfs_root, &ycache_failed_get_free_pages);
+	debugfs_create_u64("fail_get_free_page", S_IRUGO, ycache_debugfs_root,
+			   &ycache_failed_get_free_pages);
 	debugfs_create_u64("put_to_flush", S_IRUGO, ycache_debugfs_root,
 			   &ycache_put_to_flush);
 	debugfs_create_u64("fail_get_obj", S_IRUGO, ycache_debugfs_root,
@@ -1122,7 +1394,7 @@ static int __init ycache_init(void)
 {
 	pr_info("loading\n");
 #ifdef CONFIG_CLEANCACHE
-	init_ycache_host();
+	do_ycache_init();
 	if (unlikely(ycache_entry_cache_create())) {
 		pr_err("ycache_entry_cache creation failed\n");
 		goto ycache_entry_cache_fail;
