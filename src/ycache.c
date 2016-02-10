@@ -23,7 +23,7 @@
 #include <linux/module.h>
 #include <linux/cpu.h>
 #include <linux/kthread.h>
-#include <linux/completion.h>
+#include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/highmem.h>
 #include <linux/swap.h>
@@ -85,8 +85,8 @@ static atomic_t ycache_objnode_count = ATOMIC_INIT(0);
 static u64 ycache_objnode_fail;
 static u64 ycache_obj_fail;
 
-static int THREADS_COUNT = 4;
-#define WORKS_COUNT (THREADS_COUNT * 2)
+static int THREADS_COUNT = 1;
+#define WORKS_COUNT (THREADS_COUNT * 4)
 
 enum work_types { PUT, GET };
 
@@ -112,11 +112,11 @@ static struct ycache_workqueue *ycache_workqueues;
 static struct ycache_workqueue free_workqueue;
 /* task_struct for threads */
 static struct task_struct **threads;
-/* completion for getting return value from
+/* semaphore for getting return value from
    ycache_cleancache_do_get_page() */
-static struct completion *ret_completions;
-/* completion for retriving return value in ycache_cleancache_get_page() */
-static struct completion *ret_done_completions;
+static struct semaphore *ret_semaphores;
+/* semaphore for retriving return value in ycache_cleancache_get_page() */
+static struct semaphore *ret_done_semaphores;
 /* return values for ycache_cleancache_do_get_page from threads */
 static int *ret_values;
 /* semaphore for free_workqueue */
@@ -784,8 +784,9 @@ static void ycache_cleancache_put_page(int pool_id,
 
 	down_interruptible(&free_workqueue_semaphore);
 	spin_lock(&free_workqueue.lock);
-	this_work =
-	    list_first_entry(&free_workqueue.head, struct ycache_work, node);
+	this_work = list_first_entry_or_null(&free_workqueue.head,
+					     struct ycache_work, node);
+	BUG_ON(this_work == NULL);
 	list_del(&this_work->node);
 	spin_unlock(&free_workqueue.lock);
 
@@ -799,7 +800,6 @@ static void ycache_cleancache_put_page(int pool_id,
 		list_add_tail(&this_work->node, &free_workqueue.head);
 		spin_unlock(&free_workqueue.lock);
 		up(&free_workqueue_semaphore);
-		return;
 	} else {
 		/* copy page */
 		src = kmap_atomic(page);
@@ -860,7 +860,7 @@ fail:
 	ycache_put_pool(pool);
 	ycache_put_to_flush++;
 }
-
+/*
 static int ycache_cleancache_get_page(int pool_id,
 				      struct cleancache_filekey key,
 				      pgoff_t index, struct page *page)
@@ -896,16 +896,16 @@ static int ycache_cleancache_get_page(int pool_id,
 		wake_up_process(threads[thread_id]);
 	}
 
-	wait_for_completion(&ret_completions[thread_id]);
+	down_interruptible(&ret_semaphores[thread_id]);
 	ret = ret_values[thread_id];
-	complete(&ret_done_completions[thread_id]);
+	up(&ret_done_semaphores[thread_id]);
 
 	return ret;
-}
+}*/
 
-static int ycache_cleancache_do_get_page(int pool_id,
-					 struct cleancache_filekey key,
-					 pgoff_t index, struct page *page)
+static int ycache_cleancache_get_page(int pool_id,
+				      struct cleancache_filekey key,
+				      pgoff_t index, struct page *page)
 {
 	struct tmem_pool *pool;
 	struct tmem_oid *oid = (struct tmem_oid *)&key;
@@ -1154,23 +1154,27 @@ static struct shrinker ycache_shrinker = {
 /* ycache kernel threads to utilize SMP system */
 static int ycache_thread(void *data)
 {
-	static int thread_id;
+	int thread_id;
 	struct ycache_workqueue *this_wq;
 	struct ycache_work *this_work;
 
 	thread_id = (int)data;
 	this_wq = &ycache_workqueues[thread_id];
 
+	pr_info("thread_id:%d\n", thread_id);
 check_empty:
 	/* Code is constructed this way to avoid wake-up lost */
 	set_current_state(TASK_INTERRUPTIBLE);
 	spin_lock(&this_wq->lock);
 	this_work =
 	    list_first_entry_or_null(&this_wq->head, struct ycache_work, node);
-	if (this_work == NULL) {
+	while (this_work == NULL) {
 		spin_unlock(&this_wq->lock);
 		schedule();
+		set_current_state(TASK_INTERRUPTIBLE);
 		spin_lock(&this_wq->lock);
+		this_work = list_first_entry_or_null(&this_wq->head,
+						     struct ycache_work, node);
 	}
 	set_current_state(TASK_RUNNING);
 	spin_unlock(&this_wq->lock);
@@ -1178,20 +1182,23 @@ check_empty:
 	/* Rest of the code ... */
 	switch (this_work->type) {
 	case PUT:
+		// pr_info("thread/%d:PUT", thread_id);
 		ycache_cleancache_do_put_page(this_work->pool_id,
 					      this_work->key, this_work->index,
 					      this_work->page);
 		break;
-	case GET:
-		wait_for_completion(&ret_done_completions[thread_id]);
+	/*case GET:
+		// pr_info("thread/%d:GET", thread_id);
+		down_interruptible(&ret_done_semaphores[thread_id]);
 		ret_values[thread_id] = ycache_cleancache_do_get_page(
 		    this_work->pool_id, this_work->key, this_work->index,
 		    this_work->page);
-		complete(&ret_completions[thread_id]);
-		break;
+		up(&ret_semaphores[thread_id]);
+		break;*/
 	default:
 		pr_err("this_work->type not exist\n");
 		BUG();
+		break;
 	}
 
 	spin_lock(&this_wq->lock);
@@ -1207,7 +1214,6 @@ check_empty:
 	spin_unlock(&free_workqueue.lock);
 
 	up(&free_workqueue_semaphore);
-	pr_err("%d here", __LINE__);
 
 	goto check_empty;
 	/* we don't return, return written here to avoid compiler warning */
@@ -1262,24 +1268,23 @@ static __init int do_ycache_init(void)
 	}
 
 	/* comletion init */
-	ret_completions =
-	    kmalloc(sizeof(struct completion) * THREADS_COUNT, GFP_KERNEL);
-	if (unlikely(ret_completions == NULL)) {
-		goto ret_completions_fail;
+	ret_semaphores =
+	    kmalloc(sizeof(struct semaphore) * THREADS_COUNT, GFP_KERNEL);
+	if (unlikely(ret_semaphores == NULL)) {
+		goto ret_semaphores_fail;
 	} else {
 		for (i = 0; i < THREADS_COUNT; i++) {
-			init_completion(&ret_completions[i]);
+			sema_init(&ret_semaphores[i], 1);
 		}
 	}
 
-	ret_done_completions =
-	    kmalloc(sizeof(struct completion) * THREADS_COUNT, GFP_KERNEL);
-	if (unlikely(ret_done_completions == NULL)) {
-		goto ret_done_completions_fail;
+	ret_done_semaphores =
+	    kmalloc(sizeof(struct semaphore) * THREADS_COUNT, GFP_KERNEL);
+	if (unlikely(ret_done_semaphores == NULL)) {
+		goto ret_done_semaphores_fail;
 	} else {
 		for (i = 0; i < THREADS_COUNT; i++) {
-			init_completion(&ret_done_completions[i]);
-			complete(&ret_done_completions[i]);
+			sema_init(&ret_done_semaphores[i], 1);
 		}
 	}
 
@@ -1307,10 +1312,10 @@ static __init int do_ycache_init(void)
 threads_fail:
 	kfree(ret_values);
 ret_values_fail:
-	kfree(ret_done_completions);
-ret_done_completions_fail:
-	kfree(ret_completions);
-ret_completions_fail:
+	kfree(ret_done_semaphores);
+ret_done_semaphores_fail:
+	kfree(ret_semaphores);
+ret_semaphores_fail:
 	kfree(works);
 works_fail:
 	kfree(ycache_workqueues);
@@ -1394,7 +1399,10 @@ static int __init ycache_init(void)
 {
 	pr_info("loading\n");
 #ifdef CONFIG_CLEANCACHE
-	do_ycache_init();
+	if (unlikely(do_ycache_init())) {
+		pr_err("do_ycache_init failed\n");
+		goto do_ycache_init_fail;
+	};
 	if (unlikely(ycache_entry_cache_create())) {
 		pr_err("ycache_entry_cache creation failed\n");
 		goto ycache_entry_cache_fail;
@@ -1433,6 +1441,7 @@ ycache_obj_cache_fail:
 entry_cache_fail:
 	ycache_entry_cache_destroy();
 ycache_entry_cache_fail:
+do_ycache_init_fail:
 	return -ENOMEM;
 #endif
 }
