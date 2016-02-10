@@ -88,15 +88,12 @@ static u64 ycache_obj_fail;
 static int THREADS_COUNT = 1;
 #define WORKS_COUNT (THREADS_COUNT * 4)
 
-enum work_types { PUT, GET };
-
-/* represent a put or a get*/
+/* represent a put*/
 struct ycache_work {
 	int pool_id;
 	struct cleancache_filekey key;
 	pgoff_t index;
 	struct page *page;
-	enum work_types type;
 	struct list_head node;
 };
 
@@ -110,17 +107,10 @@ struct ycache_workqueue {
 static struct ycache_workqueue *ycache_workqueues;
 /* queue for storing empty ycache_work to be used */
 static struct ycache_workqueue free_workqueue;
-/* task_struct for threads */
-static struct task_struct **threads;
-/* semaphore for getting return value from
-   ycache_cleancache_do_get_page() */
-static struct semaphore *ret_semaphores;
-/* semaphore for retriving return value in ycache_cleancache_get_page() */
-static struct semaphore *ret_done_semaphores;
-/* return values for ycache_cleancache_do_get_page from threads */
-static int *ret_values;
 /* semaphore for free_workqueue */
 static struct semaphore free_workqueue_semaphore;
+/* task_struct for threads */
+static struct task_struct **threads;
 
 /*********************************
 * helpers
@@ -782,7 +772,8 @@ static void ycache_cleancache_put_page(int pool_id,
 	int thread_id;
 	struct ycache_work *this_work;
 
-	down_interruptible(&free_workqueue_semaphore);
+	if (down_interruptible(&free_workqueue_semaphore) != 0)
+		return;
 	spin_lock(&free_workqueue.lock);
 	this_work = list_first_entry_or_null(&free_workqueue.head,
 					     struct ycache_work, node);
@@ -793,7 +784,6 @@ static void ycache_cleancache_put_page(int pool_id,
 	this_work->pool_id = pool_id;
 	this_work->key = key;
 	this_work->index = index;
-	this_work->type = PUT;
 	this_work->page = alloc_page(YCACHE_GFP_MASK | __GFP_HIGHMEM);
 	if (unlikely(this_work->page == NULL)) {
 		spin_lock(&free_workqueue.lock);
@@ -860,48 +850,6 @@ fail:
 	ycache_put_pool(pool);
 	ycache_put_to_flush++;
 }
-/*
-static int ycache_cleancache_get_page(int pool_id,
-				      struct cleancache_filekey key,
-				      pgoff_t index, struct page *page)
-{
-	int thread_id;
-	struct ycache_work *this_work;
-	int ret;
-
-	down_interruptible(&free_workqueue_semaphore);
-	spin_lock(&free_workqueue.lock);
-	this_work =
-	    list_first_entry(&free_workqueue.head, struct ycache_work, node);
-	list_del(&this_work->node);
-	spin_unlock(&free_workqueue.lock);
-
-	this_work->pool_id = pool_id;
-	this_work->key = key;
-	this_work->index = index;
-	this_work->type = GET;
-	this_work->page = page;
-	if (unlikely(this_work->page == NULL)) {
-		spin_lock(&free_workqueue.lock);
-		list_add_tail(&this_work->node, &free_workqueue.head);
-		spin_unlock(&free_workqueue.lock);
-		up(&free_workqueue_semaphore);
-		BUG();
-	} else {
-		thread_id = index % THREADS_COUNT;
-		spin_lock(&ycache_workqueues[thread_id].lock);
-		list_add_tail(&this_work->node,
-			      &ycache_workqueues[thread_id].head);
-		spin_unlock(&ycache_workqueues[thread_id].lock);
-		wake_up_process(threads[thread_id]);
-	}
-
-	down_interruptible(&ret_semaphores[thread_id]);
-	ret = ret_values[thread_id];
-	up(&ret_done_semaphores[thread_id]);
-
-	return ret;
-}*/
 
 static int ycache_cleancache_get_page(int pool_id,
 				      struct cleancache_filekey key,
@@ -1179,35 +1127,15 @@ check_empty:
 	set_current_state(TASK_RUNNING);
 	spin_unlock(&this_wq->lock);
 
-	/* Rest of the code ... */
-	switch (this_work->type) {
-	case PUT:
-		// pr_info("thread/%d:PUT", thread_id);
-		ycache_cleancache_do_put_page(this_work->pool_id,
-					      this_work->key, this_work->index,
-					      this_work->page);
-		break;
-	/*case GET:
-		// pr_info("thread/%d:GET", thread_id);
-		down_interruptible(&ret_done_semaphores[thread_id]);
-		ret_values[thread_id] = ycache_cleancache_do_get_page(
-		    this_work->pool_id, this_work->key, this_work->index,
-		    this_work->page);
-		up(&ret_semaphores[thread_id]);
-		break;*/
-	default:
-		pr_err("this_work->type not exist\n");
-		BUG();
-		break;
-	}
+	ycache_cleancache_do_put_page(this_work->pool_id, this_work->key,
+				      this_work->index, this_work->page);
 
 	spin_lock(&this_wq->lock);
 	list_del(&this_work->node);
 	spin_unlock(&this_wq->lock);
 
-	if (this_work->type == PUT) {
-		__free_page(this_work->page);
-	}
+	/*TODO: to be optimized */
+	__free_page(this_work->page);
 
 	spin_lock(&free_workqueue.lock);
 	list_add_tail(&this_work->node, &free_workqueue.head);
@@ -1249,9 +1177,11 @@ static __init int do_ycache_init(void)
 			INIT_LIST_HEAD(&ycache_workqueues[i].head);
 		}
 	}
+
 	/* work queue to hold free ycache works*/
 	spin_lock_init(&free_workqueue.lock);
 	INIT_LIST_HEAD(&free_workqueue.head);
+
 	/* semaphore for free_workqueue */
 	sema_init(&free_workqueue_semaphore, WORKS_COUNT);
 
@@ -1265,33 +1195,6 @@ static __init int do_ycache_init(void)
 			list_add_tail(&works[i].node, &free_workqueue.head);
 		}
 		spin_unlock(&free_workqueue.lock);
-	}
-
-	/* comletion init */
-	ret_semaphores =
-	    kmalloc(sizeof(struct semaphore) * THREADS_COUNT, GFP_KERNEL);
-	if (unlikely(ret_semaphores == NULL)) {
-		goto ret_semaphores_fail;
-	} else {
-		for (i = 0; i < THREADS_COUNT; i++) {
-			sema_init(&ret_semaphores[i], 1);
-		}
-	}
-
-	ret_done_semaphores =
-	    kmalloc(sizeof(struct semaphore) * THREADS_COUNT, GFP_KERNEL);
-	if (unlikely(ret_done_semaphores == NULL)) {
-		goto ret_done_semaphores_fail;
-	} else {
-		for (i = 0; i < THREADS_COUNT; i++) {
-			sema_init(&ret_done_semaphores[i], 1);
-		}
-	}
-
-	/* return values for threads */
-	ret_values = kmalloc(sizeof(int) * THREADS_COUNT, GFP_KERNEL);
-	if (unlikely(ret_values == NULL)) {
-		goto ret_values_fail;
 	}
 
 	/* threads */
@@ -1310,12 +1213,6 @@ static __init int do_ycache_init(void)
 	return 0;
 
 threads_fail:
-	kfree(ret_values);
-ret_values_fail:
-	kfree(ret_done_semaphores);
-ret_done_semaphores_fail:
-	kfree(ret_semaphores);
-ret_semaphores_fail:
 	kfree(works);
 works_fail:
 	kfree(ycache_workqueues);
