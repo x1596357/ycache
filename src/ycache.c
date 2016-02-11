@@ -100,7 +100,7 @@ struct ycache_work {
 /* each thread has a queue, and an extra queue to store free works */
 struct ycache_workqueue {
 	spinlock_t lock;
-	struct list_head head;
+	struct list_head list;
 };
 
 /* array of ycache workqueue */
@@ -775,7 +775,7 @@ static void ycache_cleancache_put_page(int pool_id,
 	if (down_interruptible(&free_workqueue_semaphore) != 0)
 		return;
 	spin_lock(&free_workqueue.lock);
-	this_work = list_first_entry_or_null(&free_workqueue.head,
+	this_work = list_first_entry_or_null(&free_workqueue.list,
 					     struct ycache_work, node);
 	BUG_ON(this_work == NULL);
 	list_del(&this_work->node);
@@ -787,7 +787,7 @@ static void ycache_cleancache_put_page(int pool_id,
 	this_work->page = alloc_page(YCACHE_GFP_MASK | __GFP_HIGHMEM);
 	if (unlikely(this_work->page == NULL)) {
 		spin_lock(&free_workqueue.lock);
-		list_add_tail(&this_work->node, &free_workqueue.head);
+		list_add_tail(&this_work->node, &free_workqueue.list);
 		spin_unlock(&free_workqueue.lock);
 		up(&free_workqueue_semaphore);
 	} else {
@@ -801,7 +801,7 @@ static void ycache_cleancache_put_page(int pool_id,
 		thread_id = index % THREADS_COUNT;
 		spin_lock(&ycache_workqueues[thread_id].lock);
 		list_add_tail(&this_work->node,
-			      &ycache_workqueues[thread_id].head);
+			      &ycache_workqueues[thread_id].list);
 		spin_unlock(&ycache_workqueues[thread_id].lock);
 		wake_up_process(threads[thread_id]);
 	}
@@ -1115,30 +1115,27 @@ check_empty:
 	set_current_state(TASK_INTERRUPTIBLE);
 	spin_lock(&this_wq->lock);
 	this_work =
-	    list_first_entry_or_null(&this_wq->head, struct ycache_work, node);
+	    list_first_entry_or_null(&this_wq->list, struct ycache_work, node);
 	while (this_work == NULL) {
 		spin_unlock(&this_wq->lock);
 		schedule();
 		set_current_state(TASK_INTERRUPTIBLE);
 		spin_lock(&this_wq->lock);
-		this_work = list_first_entry_or_null(&this_wq->head,
+		this_work = list_first_entry_or_null(&this_wq->list,
 						     struct ycache_work, node);
 	}
 	set_current_state(TASK_RUNNING);
+	list_del(&this_work->node);
 	spin_unlock(&this_wq->lock);
 
 	ycache_cleancache_do_put_page(this_work->pool_id, this_work->key,
 				      this_work->index, this_work->page);
 
-	spin_lock(&this_wq->lock);
-	list_del(&this_work->node);
-	spin_unlock(&this_wq->lock);
-
 	/*TODO: to be optimized */
 	__free_page(this_work->page);
 
 	spin_lock(&free_workqueue.lock);
-	list_add_tail(&this_work->node, &free_workqueue.head);
+	list_add_tail(&this_work->node, &free_workqueue.list);
 	spin_unlock(&free_workqueue.lock);
 
 	up(&free_workqueue_semaphore);
@@ -1174,13 +1171,13 @@ static __init int do_ycache_init(void)
 	} else {
 		for (i = 0; i < THREADS_COUNT; i++) {
 			spin_lock_init(&ycache_workqueues[i].lock);
-			INIT_LIST_HEAD(&ycache_workqueues[i].head);
+			INIT_LIST_HEAD(&ycache_workqueues[i].list);
 		}
 	}
 
 	/* work queue to hold free ycache works*/
 	spin_lock_init(&free_workqueue.lock);
-	INIT_LIST_HEAD(&free_workqueue.head);
+	INIT_LIST_HEAD(&free_workqueue.list);
 
 	/* semaphore for free_workqueue */
 	sema_init(&free_workqueue_semaphore, WORKS_COUNT);
@@ -1190,11 +1187,10 @@ static __init int do_ycache_init(void)
 	if (unlikely(works == NULL)) {
 		goto works_fail;
 	} else {
-		spin_lock(&free_workqueue.lock);
+		/* no need to aquire lock yet */
 		for (i = 0; i < WORKS_COUNT; i++) {
-			list_add_tail(&works[i].node, &free_workqueue.head);
+			list_add_tail(&works[i].node, &free_workqueue.list);
 		}
-		spin_unlock(&free_workqueue.lock);
 	}
 
 	/* threads */
@@ -1204,8 +1200,8 @@ static __init int do_ycache_init(void)
 		goto threads_fail;
 	} else {
 		for (i = 0; i < THREADS_COUNT; i++) {
-			threads[i] = kthread_create(ycache_thread, (void *)i,
-						    "kycached/%d", i);
+			threads[i] = kthread_run(ycache_thread, (void *)i,
+						 "kycached/%d", i);
 			BUG_ON(IS_ERR(threads[i]));
 		}
 	}
