@@ -85,7 +85,7 @@ static atomic_t ycache_objnode_count = ATOMIC_INIT(0);
 static u64 ycache_objnode_fail;
 static u64 ycache_obj_fail;
 
-static int THREADS_COUNT = 1;
+static int THREADS_COUNT = 3;
 #define WORKS_COUNT (THREADS_COUNT * 16)
 
 /* represent a put*/
@@ -770,9 +770,9 @@ static void ycache_cleancache_put_page(int pool_id,
 	int thread_id;
 	struct ycache_work *this_work;
 
-	pr_debug("trylock\n");
-	if (down_trylock(&free_workqueue_semaphore) != 0) {
-		pr_debug("trylock failed\n");
+	//pr_debug("trylock\n");
+	if (down_interruptible(&free_workqueue_semaphore) != 0) {
+		//pr_debug("trylock failed\n");
 		return;
 	}
 	spin_lock(&free_workqueue.lock);
@@ -800,7 +800,7 @@ static void ycache_cleancache_put_page(int pool_id,
 		kunmap_atomic(src);
 
 		thread_id = index % THREADS_COUNT;
-		pr_info("allocate put to thread/%d", thread_id);
+		//pr_info("allocate put to thread/%d", thread_id);
 		spin_lock(&ycache_workqueues[thread_id].lock);
 		list_add_tail(&this_work->node,
 			      &ycache_workqueues[thread_id].list);
@@ -1140,7 +1140,7 @@ static int ycache_thread(void *data)
 		spin_unlock(&free_workqueue.lock);
 
 		up(&free_workqueue_semaphore);
-		pr_debug("up\n");
+		//pr_debug("up\n");
 	}
 	/* we don't return, return written here to avoid compiler warning */
 	return 0;
