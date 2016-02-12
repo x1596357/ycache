@@ -86,7 +86,7 @@ static u64 ycache_objnode_fail;
 static u64 ycache_obj_fail;
 
 static int THREADS_COUNT = 1;
-#define WORKS_COUNT (THREADS_COUNT * 4)
+#define WORKS_COUNT (THREADS_COUNT * 16)
 
 /* represent a put*/
 struct ycache_work {
@@ -172,15 +172,15 @@ static void __init page_entry_cache_destroy(void)
 /* forward reference */
 static void page_entry_cache_free(struct page_entry *);
 
-static struct page_entry *page_entry_cache_alloc(gfp_t gfp)
+static struct page_entry *page_entry_cache_alloc(gfp_t gfp, struct page *page)
 {
 	struct page_entry *entry;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
 	entry = kmem_cache_alloc(page_entry_cache, gfp);
 	if (likely(entry != NULL)) {
-		/* alloc page*/
-		entry->page = alloc_page(gfp | __GFP_HIGHMEM);
+		/* copy page pointer */
+		entry->page = page;
 		if (likely(entry->page != NULL)) {
 			entry->page_nr = 1;
 			RB_CLEAR_NODE(&entry->rbnode);
@@ -204,6 +204,7 @@ static void page_entry_cache_free(struct page_entry *entry)
 	BUG_ON(entry == NULL);
 	if (likely(entry->page != NULL)) {
 		__free_page(entry->page);
+		entry->page = NULL;
 		atomic_dec(&ycache_used_pages);
 	}
 	kmem_cache_free(page_entry_cache, entry);
@@ -533,7 +534,7 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 	struct page_entry *dupentry;
 	int result;
 	u8 hash[HASH_DIGEST_SIZE];
-	u8 *src, *dst;
+	u8 *src;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
 
@@ -560,16 +561,11 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 	if (likely(page_entry == NULL)) {
 		spin_unlock(&ycache_host.lock);
 
-		page_entry = page_entry_cache_alloc(YCACHE_GFP_MASK);
+		page_entry = page_entry_cache_alloc(YCACHE_GFP_MASK, page);
 		if (unlikely(page_entry == NULL)) {
 			goto reject_page_entry;
 		}
-		/* copy page */
-		src = kmap_atomic(page);
-		dst = kmap_atomic(page_entry->page);
-		copy_page(dst, src);
-		kunmap_atomic(dst);
-		kunmap_atomic(src);
+
 		/* copy hash values */
 		memcpy(page_entry->hash, hash, HASH_DIGEST_SIZE);
 
@@ -602,11 +598,13 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 		/* add to free list */
 		list_add_tail(&ycache_entry->list, &ycache_entry_list);
 		spin_unlock(&ycache_host.lock);
+		__free_page(page);
 		pampd = (void *)ycache_entry;
 	}
 	/* hash is the same but data is not */
 	else {
 		spin_unlock(&ycache_host.lock);
+		__free_page(page);
 		ycache_hash_collision++;
 		goto reject_page_entry;
 	}
@@ -772,8 +770,11 @@ static void ycache_cleancache_put_page(int pool_id,
 	int thread_id;
 	struct ycache_work *this_work;
 
-	if (down_interruptible(&free_workqueue_semaphore) != 0)
+	pr_debug("trylock\n");
+	if (down_trylock(&free_workqueue_semaphore) != 0) {
+		pr_debug("trylock failed\n");
 		return;
+	}
 	spin_lock(&free_workqueue.lock);
 	this_work = list_first_entry_or_null(&free_workqueue.list,
 					     struct ycache_work, node);
@@ -843,6 +844,7 @@ static void ycache_cleancache_do_put_page(int pool_id,
 	ycache_put_pool(pool);
 	return;
 fail:
+	__free_page(page);
 	/* flush if put failed */
 	pool = ycache_get_pool_by_id(pool_id);
 	if (likely(pool != NULL && atomic_read(&pool->obj_count) > 0)) {
@@ -1111,37 +1113,35 @@ static int ycache_thread(void *data)
 	this_wq = &ycache_workqueues[thread_id];
 
 	pr_info("thread_id:%d\n", thread_id);
-check_empty:
-	/* Code is constructed this way to avoid wake-up lost */
-	set_current_state(TASK_INTERRUPTIBLE);
-	spin_lock(&this_wq->lock);
-	this_work =
-	    list_first_entry_or_null(&this_wq->list, struct ycache_work, node);
-	while (this_work == NULL) {
-		spin_unlock(&this_wq->lock);
-		schedule();
+	for (;;) {
+		/* Code is constructed this way to avoid wake-up lost */
 		set_current_state(TASK_INTERRUPTIBLE);
 		spin_lock(&this_wq->lock);
 		this_work = list_first_entry_or_null(&this_wq->list,
 						     struct ycache_work, node);
+		while (this_work == NULL) {
+			spin_unlock(&this_wq->lock);
+			schedule();
+			set_current_state(TASK_INTERRUPTIBLE);
+			spin_lock(&this_wq->lock);
+			this_work = list_first_entry_or_null(
+			    &this_wq->list, struct ycache_work, node);
+		}
+		set_current_state(TASK_RUNNING);
+		list_del_init(&this_work->node);
+		spin_unlock(&this_wq->lock);
+
+		ycache_cleancache_do_put_page(this_work->pool_id,
+					      this_work->key, this_work->index,
+					      this_work->page);
+
+		spin_lock(&free_workqueue.lock);
+		list_add_tail(&this_work->node, &free_workqueue.list);
+		spin_unlock(&free_workqueue.lock);
+
+		up(&free_workqueue_semaphore);
+		pr_debug("up\n");
 	}
-	set_current_state(TASK_RUNNING);
-	list_del_init(&this_work->node);
-	spin_unlock(&this_wq->lock);
-
-	ycache_cleancache_do_put_page(this_work->pool_id, this_work->key,
-				      this_work->index, this_work->page);
-
-	/*TODO: to be optimized */
-	__free_page(this_work->page);
-
-	spin_lock(&free_workqueue.lock);
-	list_add_tail(&this_work->node, &free_workqueue.list);
-	spin_unlock(&free_workqueue.lock);
-
-	up(&free_workqueue_semaphore);
-
-	goto check_empty;
 	/* we don't return, return written here to avoid compiler warning */
 	return 0;
 }
@@ -1201,8 +1201,8 @@ static __init int do_ycache_init(void)
 		goto threads_fail;
 	} else {
 		for (i = 0; i < THREADS_COUNT; i++) {
-			threads[i] = kthread_run(ycache_thread, (void *)i,
-						 "kycached/%d", i);
+			threads[i] = kthread_create(ycache_thread, (void *)i,
+						    "kycached/%d", i);
 			BUG_ON(IS_ERR(threads[i]));
 		}
 	}
