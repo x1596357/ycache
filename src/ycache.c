@@ -672,7 +672,7 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 
 	/* Remove from list and free it */
 	spin_lock(&ycache_host.lock);
-	list_del(&ycache_entry->list);
+	list_del_init(&ycache_entry->list);
 	spin_unlock(&ycache_host.lock);
 	ycache_entry_cache_free(ycache_entry);
 
@@ -715,7 +715,7 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 
 	/* Remove from list and free it */
 	spin_lock(&ycache_host.lock);
-	list_del(&ycache_entry->list);
+	list_del_init(&ycache_entry->list);
 	spin_unlock(&ycache_host.lock);
 	ycache_entry_cache_free(ycache_entry);
 
@@ -778,7 +778,7 @@ static void ycache_cleancache_put_page(int pool_id,
 	this_work = list_first_entry_or_null(&free_workqueue.list,
 					     struct ycache_work, node);
 	BUG_ON(this_work == NULL);
-	list_del(&this_work->node);
+	list_del_init(&this_work->node);
 	spin_unlock(&free_workqueue.lock);
 
 	this_work->pool_id = pool_id;
@@ -799,6 +799,7 @@ static void ycache_cleancache_put_page(int pool_id,
 		kunmap_atomic(src);
 
 		thread_id = index % THREADS_COUNT;
+		pr_info("allocate put to thread/%d", thread_id);
 		spin_lock(&ycache_workqueues[thread_id].lock);
 		list_add_tail(&this_work->node,
 			      &ycache_workqueues[thread_id].list);
@@ -1125,7 +1126,7 @@ check_empty:
 						     struct ycache_work, node);
 	}
 	set_current_state(TASK_RUNNING);
-	list_del(&this_work->node);
+	list_del_init(&this_work->node);
 	spin_unlock(&this_wq->lock);
 
 	ycache_cleancache_do_put_page(this_work->pool_id, this_work->key,
@@ -1295,7 +1296,7 @@ static int __init ycache_init(void)
 	if (unlikely(do_ycache_init())) {
 		pr_err("do_ycache_init failed\n");
 		goto do_ycache_init_fail;
-	};
+	}
 	if (unlikely(ycache_entry_cache_create())) {
 		pr_err("ycache_entry_cache creation failed\n");
 		goto ycache_entry_cache_fail;
