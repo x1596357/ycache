@@ -239,7 +239,7 @@ static void page_rb_erase(struct rb_root *root, struct page_entry *entry)
 	// pr_debug("call %s()\n", __FUNCTION__);
 	if (likely(!RB_EMPTY_NODE(&entry->rbnode))) {
 		rb_erase(&entry->rbnode, root);
-		//RB_CLEAR_NODE(&entry->rbnode);
+		// RB_CLEAR_NODE(&entry->rbnode);
 	}
 }
 
@@ -363,7 +363,7 @@ static struct ycache_entry *ycache_entry_cache_alloc(gfp_t gfp)
 		ycache_yentry_fail++;
 		return NULL;
 	}
-	//INIT_LIST_HEAD(&entry->list);
+	// INIT_LIST_HEAD(&entry->list);
 	atomic_inc(&ycache_total_pages);
 	return entry;
 }
@@ -885,21 +885,20 @@ static int ycache_cleancache_init_fs(size_t pagesize)
 	BUG_ON(sizeof(struct cleancache_filekey) != sizeof(u64[3]));
 	BUG_ON(pagesize != PAGE_SIZE);
 
-	pool = kmalloc(sizeof(struct tmem_pool), GFP_KERNEL);
+	pool = kmalloc(sizeof(struct tmem_pool), GFP_ATOMIC);
 	if (unlikely(pool == NULL)) {
 		pr_warn("pool creation failed: out of memory\n");
 		goto out;
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
-	idr_preload(GFP_KERNEL);
-	pool_id =
-	    idr_alloc(&ycache_host.tmem_pools, pool, 0, 0, GFP_KERNEL);
+	idr_preload(GFP_ATOMIC);
+	pool_id = idr_alloc(&ycache_host.tmem_pools, pool, 0, 0, GFP_ATOMIC);
 	idr_preload_end();
 #else
 	int ret;
 	do {
-		ret = idr_pre_get(&ycache_host.tmem_pools, GFP_KERNEL);
+		ret = idr_pre_get(&ycache_host.tmem_pools, GFP_ATOMIC);
 		if (unlikely(ret != 1)) {
 			kfree(pool);
 			pr_info("get pool_id failed: out of memory\n");
@@ -979,25 +978,25 @@ static unsigned long ycache_shrink(unsigned long nr)
 	while (freed_nr < nr) {
 		spin_lock(&ycache_host.lock);
 		ycache_entry = list_first_entry_or_null(
-			&ycache_entry_list, struct ycache_entry,list);
+		    &ycache_entry_list, struct ycache_entry, list);
 		if (unlikely(ycache_entry == NULL)) {
 			/* list is empty */
 			spin_unlock(&ycache_host.lock);
 			break;
 		} else {
-			pool_id=ycache_entry->pool_id;
+			pool_id = ycache_entry->pool_id;
 			oid = ycache_entry->oid;
 			index = ycache_entry->index;
 			spin_unlock(&ycache_host.lock);
 		}
-		
+
 		pool = ycache_get_pool_by_id(pool_id);
 		if (likely(pool != NULL)) {
 			if (likely(atomic_read(&pool->obj_count) > 0))
 				ret = tmem_flush_page(pool, &oid, index);
 			ycache_put_pool(pool);
 		}
-		if (likely(ret >= 0)){
+		if (likely(ret >= 0)) {
 			ycache_flush_page_found++;
 			freed_nr++;
 		}
@@ -1095,8 +1094,8 @@ static int __init ycache_debugfs_init(void)
 			   &ycache_flush_obj_found);
 	debugfs_create_u64("fail_puts", S_IRUGO, ycache_debugfs_root,
 			   &ycache_failed_puts);
-	debugfs_create_u64("fail_get_free_page", S_IRUGO,
-			   ycache_debugfs_root, &ycache_failed_get_free_pages);
+	debugfs_create_u64("fail_get_free_page", S_IRUGO, ycache_debugfs_root,
+			   &ycache_failed_get_free_pages);
 	debugfs_create_u64("put_to_flush", S_IRUGO, ycache_debugfs_root,
 			   &ycache_put_to_flush);
 	debugfs_create_u64("fail_get_obj", S_IRUGO, ycache_debugfs_root,
