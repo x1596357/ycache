@@ -46,8 +46,9 @@
 #error "This module is useless without cleancache"
 #endif
 
-#define YCACHE_GFP_MASK                                                        \
-	(__GFP_FS | __GFP_NORETRY | __GFP_NOWARN | __GFP_NOMEMALLOC)
+/*#define YCACHE_GFP_MASK \
+	(__GFP_FS | __GFP_NORETRY | __GFP_NOWARN | __GFP_NOMEMALLOC)*/
+#define YCACHE_GFP_MASK GFP_ATOMIC
 #define MAX_PAGE_RBTREES 256
 /* Use MD5 as hash function for now */
 #define YCACHE_HASH_FUNC "md5"
@@ -271,22 +272,16 @@ static void page_entry_nr_dec(struct rb_root *rbroot, struct page_entry *entry)
  *
  * Return:  0 if the caculation is successful, <0 if an error occurred
  */
+struct hash_desc desc;
 static int page_to_hash(const void *src, u8 *result)
 {
-	struct hash_desc desc;
 	struct scatterlist sg;
 	int ret = 0;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
 	sg_init_one(&sg, (const u8 *)src, PAGE_SIZE);
-	desc.tfm = crypto_alloc_hash(YCACHE_HASH_FUNC, 0, CRYPTO_ALG_ASYNC);
-	/* fail to allocate a cipher handle */
-	if (unlikely(IS_ERR(desc.tfm))) {
-		ret = -EINVAL;
-		goto out;
-	}
 
-	desc.flags = CRYPTO_TFM_REQ_MAY_SLEEP;
+	desc.flags = 0;
 	ret = crypto_hash_init(&desc);
 	if (unlikely(ret))
 		goto out;
@@ -297,7 +292,7 @@ static int page_to_hash(const void *src, u8 *result)
 	if (unlikely(ret))
 		goto out;
 out:
-	crypto_free_hash(desc.tfm);
+
 	if (unlikely(ret != 0))
 		ycache_hash_fail++;
 	return ret;
@@ -507,6 +502,8 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 	u8 *src, *dst;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
+	/*pr_debug("%s in_atomic():%d irqs_disabled():%d\n", __FUNCTION__,
+		 in_atomic(), irqs_disabled());*/
 
 	BUG_ON(data == NULL);
 
@@ -520,9 +517,9 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 
 	page = (struct page *)data;
 	/* calculating MD5 */
-	src = kmap(page);
+	src = kmap_atomic(page);
 	page_to_hash(src, hash);
-	kunmap(page);
+	kunmap_atomic(src);
 
 	rbroot = get_rbroot(hash);
 	spin_lock(&ycache_host.lock);
@@ -745,6 +742,8 @@ static void ycache_cleancache_put_page(int pool_id,
 	int ret = -1;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
+	/*pr_debug("%s in_atomic():%d irqs_disabled():%d\n", __FUNCTION__,
+		 in_atomic(), irqs_disabled());*/
 
 	// Shrinker is being called, reject all puts
 	if (unlikely(ycache_is_shrinking())) {
@@ -1027,7 +1026,7 @@ static struct shrinker ycache_shrinker = {
     .seeks = DEFAULT_SEEKS,
 };
 
-static __init void init_ycache_host(void)
+static __init int init_ycache_host(void)
 {
 	int i;
 	// pr_debug("call %s()\n", __FUNCTION__);
@@ -1042,6 +1041,13 @@ static __init void init_ycache_host(void)
 	}
 	/* Init free list*/
 	INIT_LIST_HEAD(&ycache_entry_list);
+
+	desc.tfm = crypto_alloc_hash(YCACHE_HASH_FUNC, 0, 0);
+	/* fail to allocate a cipher handle */
+	if (unlikely(IS_ERR(desc.tfm))) {
+		return -ENOMEM;
+	}
+	return 0;
 }
 
 /*********************************
@@ -1121,7 +1127,10 @@ static int __init ycache_init(void)
 {
 	pr_info("loading\n");
 #ifdef CONFIG_CLEANCACHE
-	init_ycache_host();
+	if (unlikely(init_ycache_host())) {
+		pr_err("init_ycache_host failed\n");
+		goto ycache_init_fail;
+	}
 	if (unlikely(ycache_entry_cache_create())) {
 		pr_err("ycache_entry_cache creation failed\n");
 		goto ycache_entry_cache_fail;
@@ -1153,6 +1162,8 @@ static int __init ycache_init(void)
 	return 0;
 
 #ifdef CONFIG_CLEANCACHE
+ycache_init_fail:
+	crypto_free_hash(desc.tfm);
 ycache_objnode_cache_fail:
 	ycache_obj_cache_destroy();
 ycache_obj_cache_fail:
