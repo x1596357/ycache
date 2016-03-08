@@ -49,8 +49,6 @@
 #error "This module is useless without cleancache"
 #endif
 
-#define YCACHE_GFP_MASK                                                        \
-	(__GFP_FS | __GFP_NORETRY | __GFP_NOWARN | __GFP_NOMEMALLOC)
 #define MAX_PAGE_RBTREES 256
 /* Use MD5 as hash function for now */
 #define YCACHE_HASH_FUNC "md5"
@@ -121,10 +119,10 @@ static struct ycache_work *work_cache_alloc(void)
 	struct ycache_work *work;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
-	work = kmem_cache_alloc(work_cache, YCACHE_GFP_MASK);
+	work = kmem_cache_alloc(work_cache, GFP_ATOMIC);
 	if (likely(work != NULL)) {
 		/* copy page pointer */
-		work->page =  alloc_page(__GFP_FS | __GFP_NOWARN | __GFP_NOMEMALLOC | __GFP_HIGHMEM);
+		work->page = alloc_page(GFP_ATOMIC | __GFP_HIGHMEM);
 		if (likely(work->page != NULL)) {
 			atomic_inc(&ycache_used_pages);
 			return work;
@@ -150,8 +148,6 @@ static void work_cache_free(struct ycache_work *work)
 	kmem_cache_free(work_cache, work);
 }
 
-
-
 /* each thread has a queue, and an extra queue to store free works */
 struct ycache_workqueue {
 	spinlock_t lock;
@@ -161,9 +157,9 @@ struct ycache_workqueue {
 /* array of ycache workqueue */
 static struct ycache_workqueue *ycache_workqueues;
 /* queue for storing empty ycache_work to be used */
-//static struct ycache_workqueue free_workqueue;
+// static struct ycache_workqueue free_workqueue;
 /* semaphore for free_workqueue */
-//static struct semaphore free_workqueue_semaphore;
+// static struct semaphore free_workqueue_semaphore;
 /* task_struct for threads */
 static struct task_struct **threads;
 
@@ -240,7 +236,7 @@ static struct page_entry *page_entry_cache_alloc(gfp_t gfp, struct page *page)
 		if (likely(entry->page != NULL)) {
 			entry->page_nr = 1;
 			RB_CLEAR_NODE(&entry->rbnode);
-			//atomic_inc(&ycache_used_pages);
+			// atomic_inc(&ycache_used_pages);
 			return entry;
 		} else {
 			page_entry_cache_free(entry);
@@ -357,33 +353,27 @@ static void page_entry_nr_dec(struct rb_root *rbroot, struct page_entry *entry)
  *
  * Return:  0 if the caculation is successful, <0 if an error occurred
  */
-static int page_to_hash(const void *src, u8 *result)
+struct hash_desc *descs;
+static int page_to_hash(const void *src, u8 *result, int thread_id)
 {
-	struct hash_desc desc;
+
 	struct scatterlist sg;
 	int ret = 0;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
 	sg_init_one(&sg, (const u8 *)src, PAGE_SIZE);
-	desc.tfm = crypto_alloc_hash(YCACHE_HASH_FUNC, 0, CRYPTO_ALG_ASYNC);
-	/* fail to allocate a cipher handle */
-	if (unlikely(IS_ERR(desc.tfm))) {
-		ret = -EINVAL;
-		goto out;
-	}
 
-	desc.flags = CRYPTO_TFM_REQ_MAY_SLEEP;
-	ret = crypto_hash_init(&desc);
+	descs[thread_id].flags = 0;
+	ret = crypto_hash_init(&descs[thread_id]);
 	if (unlikely(ret))
 		goto out;
-	ret = crypto_hash_update(&desc, &sg, PAGE_SIZE);
+	ret = crypto_hash_update(&descs[thread_id], &sg, PAGE_SIZE);
 	if (unlikely(ret))
 		goto out;
-	ret = crypto_hash_final(&desc, result);
+	ret = crypto_hash_final(&descs[thread_id], result);
 	if (unlikely(ret))
 		goto out;
 out:
-	crypto_free_hash(desc.tfm);
 	if (unlikely(ret != 0))
 		ycache_hash_fail++;
 	return ret;
@@ -465,7 +455,6 @@ static void ycache_entry_cache_free(struct ycache_entry *entry)
 
 /* ycache structure */
 struct ycache_client {
-	//spinlock_t lock;
 	struct idr tmem_pools;
 };
 
@@ -514,7 +503,9 @@ static struct tmem_obj *ycache_obj_cache_alloc(struct tmem_pool *pool)
 	struct tmem_obj *obj = NULL;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
-	obj = kmem_cache_alloc(ycache_obj_cache, YCACHE_GFP_MASK);
+	/*pr_debug("%s in_atomic():%d irqs_disabled():%d\n", __FUNCTION__,
+		 in_atomic(), irqs_disabled());*/
+	obj = kmem_cache_alloc(ycache_obj_cache, GFP_ATOMIC);
 	if (unlikely(obj == NULL)) {
 		ycache_obj_fail++;
 		return NULL;
@@ -550,7 +541,9 @@ static struct tmem_objnode *ycache_objnode_cache_alloc(struct tmem_pool *pool)
 	struct tmem_objnode *objnode = NULL;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
-	objnode = kmem_cache_alloc(ycache_objnode_cache, YCACHE_GFP_MASK);
+	/*pr_debug("%s in_atomic():%d irqs_disabled():%d\n", __FUNCTION__,
+		 in_atomic(), irqs_disabled());*/
+	objnode = kmem_cache_alloc(ycache_objnode_cache, GFP_ATOMIC);
 	if (unlikely(objnode == NULL)) {
 		ycache_objnode_fail++;
 		return NULL;
@@ -590,14 +583,17 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 	struct page *page;
 	struct page_entry *dupentry;
 	int result;
+	int thread_id;
 	u8 hash[HASH_DIGEST_SIZE];
 	u8 *src;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
+	/*pr_debug("%s in_atomic():%d irqs_disabled():%d\n", __FUNCTION__,
+		 in_atomic(), irqs_disabled());*/
 
 	BUG_ON(data == NULL);
 
-	ycache_entry = ycache_entry_cache_alloc(YCACHE_GFP_MASK);
+	ycache_entry = ycache_entry_cache_alloc(GFP_ATOMIC);
 	if (unlikely(ycache_entry == NULL)) {
 		goto reject_ycache_entry;
 	}
@@ -607,19 +603,20 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 
 	page = (struct page *)data;
 	/* calculating MD5 */
-	src = kmap(page);
-	page_to_hash(src, hash);
-	kunmap(page);
+	thread_id = index % THREADS_COUNT;
+	src = kmap_atomic(page);
+	page_to_hash(src, hash, thread_id);
+	kunmap_atomic(src);
 
 	rbroot = get_rbroot(hash);
 	spin_lock(&rblocks[hash[0]]);
 	page_entry = page_rb_search(rbroot, hash);
-	if (unlikely(page_entry != NULL)) 
+	if (page_entry != NULL)
 		page_entry_nr_inc(page_entry);
 	spin_unlock(&rblocks[hash[0]]);
 	/* hash not exists */
-	if (likely(page_entry == NULL)) {
-		page_entry = page_entry_cache_alloc(YCACHE_GFP_MASK, page);
+	if (page_entry == NULL) {
+		page_entry = page_entry_cache_alloc(GFP_ATOMIC, page);
 		if (unlikely(page_entry == NULL)) {
 			goto reject_page_entry;
 		}
@@ -638,7 +635,7 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 		// should it happen
 		spin_unlock(&rblocks[hash[0]]);
 		if (unlikely(result == -EEXIST)) {
-			page_entry->page=NULL;
+			page_entry->page = NULL;
 			page_entry_cache_free(page_entry);
 			goto reject_page_entry;
 		} else {
@@ -664,7 +661,7 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 	/* hash is the same but data is not */
 	else {
 		spin_lock(&rblocks[hash[0]]);
-		page_entry_nr_dec(rbroot,page_entry);
+		page_entry_nr_dec(rbroot, page_entry);
 		spin_unlock(&rblocks[hash[0]]);
 		//__free_page(page);
 		ycache_hash_collision++;
@@ -720,6 +717,7 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 	struct page_entry *page_entry;
 	struct rb_root *rbroot;
 	u8 *src, *dst;
+	unsigned int hash0;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
 	BUG_ON(!is_ephemeral(pool));
@@ -747,10 +745,11 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 	kunmap_atomic(src);
 
 	rbroot = get_rbroot(page_entry->hash);
-	spin_lock(&rblocks[page_entry->hash[0]]);
+	hash0 = page_entry->hash[0];
+	spin_lock(&rblocks[hash0]);
 	/* drop one page count */
 	page_entry_nr_dec(rbroot, page_entry);
-	spin_unlock(&rblocks[page_entry->hash[0]]);
+	spin_unlock(&rblocks[hash0]);
 
 	return 0;
 }
@@ -765,6 +764,7 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 	struct ycache_entry *ycache_entry;
 	struct page_entry *page_entry;
 	struct rb_root *rbroot;
+	unsigned int hash0;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
 	BUG_ON(pampd == NULL);
@@ -780,10 +780,11 @@ static void ycache_pampd_free(void *pampd, struct tmem_pool *pool,
 	ycache_entry_cache_free(ycache_entry);
 
 	rbroot = get_rbroot(page_entry->hash);
-	spin_lock(&rblocks[page_entry->hash[0]]);
+	hash0 = page_entry->hash[0];
+	spin_lock(&rblocks[hash0]);
 	/* drop one page count */
 	page_entry_nr_dec(rbroot, page_entry);
-	spin_unlock(&rblocks[page_entry->hash[0]]);
+	spin_unlock(&rblocks[hash0]);
 }
 
 static void ycache_pampd_free_obj(struct tmem_pool *pool, struct tmem_obj *obj)
@@ -831,26 +832,14 @@ static void ycache_cleancache_put_page(int pool_id,
 	u8 *src, *dst;
 	int thread_id;
 	struct ycache_work *this_work;
-#if 0
-	//pr_debug("trylock\n");
-	if (down_interruptible(&free_workqueue_semaphore) != 0) {
-		//pr_debug("trylock failed\n");
+
+	/*pr_debug("%s in_atomic():%d irqs_disabled():%d\n", __FUNCTION__,
+		 in_atomic(), irqs_disabled());*/
+	this_work = work_cache_alloc();
+	if (this_work == NULL) {
+		pr_debug("%s return\n", __FUNCTION__);
 		return;
-	}
-	spin_lock(&free_workqueue.lock);
-	this_work = list_first_entry_or_null(&free_workqueue.list,
-					     struct ycache_work, node);
-	BUG_ON(this_work == NULL);
-	list_del_init(&this_work->node);
-	spin_unlock(&free_workqueue.lock);
-#endif
-	this_work=work_cache_alloc();
-	if(this_work==NULL)
-	{
-		pr_debug("%s return\n",__FUNCTION__);
-		return;
-	}
-	else{
+	} else {
 		this_work->pool_id = pool_id;
 		this_work->key = key;
 		this_work->index = index;
@@ -863,10 +852,10 @@ static void ycache_cleancache_put_page(int pool_id,
 		kunmap_atomic(src);
 
 		thread_id = index % THREADS_COUNT;
-		//pr_info("allocate put to thread/%d", thread_id);
+		// pr_info("allocate put to thread/%d", thread_id);
 		spin_lock(&ycache_workqueues[thread_id].lock);
 		list_add_tail(&this_work->node,
-		     &ycache_workqueues[thread_id].list);
+			      &ycache_workqueues[thread_id].list);
 		spin_unlock(&ycache_workqueues[thread_id].lock);
 		wake_up_process(threads[thread_id]);
 	}
@@ -882,6 +871,8 @@ static void ycache_cleancache_do_put_page(int pool_id,
 	int ret = -1;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
+	/*pr_debug("%s in_atomic():%d irqs_disabled():%d\n", __FUNCTION__,
+		 in_atomic(), irqs_disabled());*/
 
 	// Shrinker is being called, reject all puts
 	if (unlikely(ycache_is_shrinking())) {
@@ -1024,20 +1015,20 @@ static int ycache_cleancache_init_fs(size_t pagesize)
 	BUG_ON(sizeof(struct cleancache_filekey) != sizeof(u64[3]));
 	BUG_ON(pagesize != PAGE_SIZE);
 
-	pool = kmalloc(sizeof(struct tmem_pool), GFP_KERNEL);
+	pool = kmalloc(sizeof(struct tmem_pool), GFP_ATOMIC);
 	if (unlikely(pool == NULL)) {
 		pr_warn("pool creation failed: out of memory\n");
 		goto out;
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
-	idr_preload(GFP_KERNEL);
-	pool_id = idr_alloc(&ycache_host.tmem_pools, pool, 0, 0, GFP_KERNEL);
+	idr_preload(GFP_ATOMIC);
+	pool_id = idr_alloc(&ycache_host.tmem_pools, pool, 0, 0, GFP_ATOMIC);
 	idr_preload_end();
 #else
 	int ret;
 	do {
-		ret = idr_pre_get(&ycache_host.tmem_pools, GFP_KERNEL);
+		ret = idr_pre_get(&ycache_host.tmem_pools, GFP_ATOMIC);
 		if (unlikely(ret != 1)) {
 			kfree(pool);
 			pr_info("get pool_id failed: out of memory\n");
@@ -1177,6 +1168,8 @@ static int ycache_thread(void *data)
 	this_wq = &ycache_workqueues[thread_id];
 
 	pr_info("thread_id:%d\n", thread_id);
+	/*pr_debug("%s in_atomic():%d irqs_disabled():%d\n", __FUNCTION__,
+		 in_atomic(), irqs_disabled());*/
 	for (;;) {
 		/* Code is constructed this way to avoid wake-up lost */
 		set_current_state(TASK_INTERRUPTIBLE);
@@ -1199,11 +1192,8 @@ static int ycache_thread(void *data)
 					      this_work->key, this_work->index,
 					      this_work->page);
 
-		this_work->page=NULL;
+		this_work->page = NULL;
 		work_cache_free(this_work);
-
-		//up(&free_workqueue_semaphore);
-		//pr_debug("up\n");
 	}
 	/* we don't return, return written here to avoid compiler warning */
 	return 0;
@@ -1211,12 +1201,12 @@ static int ycache_thread(void *data)
 
 static __init int do_ycache_init(void)
 {
-//	struct ycache_work *works;
+	//	struct ycache_work *works;
 	int i;
 	// pr_debug("call %s()\n", __FUNCTION__);
 
 	/* Init host spinlock */
-	//spin_lock_init(&ycache_host.lock);
+	// spin_lock_init(&ycache_host.lock);
 	/* Init host idr */
 	idr_init(&ycache_host.tmem_pools);
 	/* Init page trees */
@@ -1228,18 +1218,33 @@ static __init int do_ycache_init(void)
 	/* Init free list for ycache entry*/
 	INIT_LIST_HEAD(&ycache_entry_list);
 
+	/* Init hash_desc for page_to_hash() */
+	descs = kmalloc(sizeof(struct hash_desc) * THREADS_COUNT, GFP_KERNEL);
+	if (unlikely(descs == NULL)) {
+		goto fail;
+	} else {
+		for (i = 0; i < THREADS_COUNT; i++) {
+			descs[i].tfm =
+			    crypto_alloc_hash(YCACHE_HASH_FUNC, 0, 0);
+			/* fail to allocate a cipher handle */
+			if (unlikely(IS_ERR(descs[i].tfm))) {
+				goto alloc_hash_fail;
+			}
+		}
+	}
 	/* Init thread related data structure*/
 	/* work queues for each thread */
 	ycache_workqueues = kmalloc(
 	    sizeof(struct ycache_workqueue) * THREADS_COUNT, GFP_KERNEL);
 	if (unlikely(ycache_workqueues == NULL)) {
-		return -ENOMEM;
+		goto ycache_workqueues_fail;
 	} else {
 		for (i = 0; i < THREADS_COUNT; i++) {
 			spin_lock_init(&ycache_workqueues[i].lock);
 			INIT_LIST_HEAD(&ycache_workqueues[i].list);
 		}
 	}
+
 #if 0
 	/* work queue to hold free ycache works*/
 	spin_lock_init(&free_workqueue.lock);
@@ -1277,11 +1282,20 @@ static __init int do_ycache_init(void)
 	return 0;
 
 threads_fail:
-/*
-	kfree(works);
-works_fail:
-*/
+	/*
+		kfree(works);
+	works_fail:
+	*/
 	kfree(ycache_workqueues);
+ycache_workqueues_fail:
+alloc_hash_fail:
+	for (i = 0; i < THREADS_COUNT; i++) {
+		if (!IS_ERR(descs[i].tfm)) {
+			crypto_free_hash(descs[i].tfm);
+		}
+	}
+	kfree(descs);
+fail:
 	return -ENOMEM;
 }
 
