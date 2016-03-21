@@ -321,7 +321,7 @@ static void page_rb_erase(struct rb_root *root, struct page_entry *entry)
 	// pr_debug("call %s()\n", __FUNCTION__);
 	if (likely(!RB_EMPTY_NODE(&entry->rbnode))) {
 		rb_erase(&entry->rbnode, root);
-		// RB_CLEAR_NODE(&entry->rbnode);
+		RB_CLEAR_NODE(&entry->rbnode);
 	}
 }
 
@@ -353,7 +353,7 @@ static void page_entry_nr_dec(struct rb_root *rbroot, struct page_entry *entry)
  *
  * Return:  0 if the caculation is successful, <0 if an error occurred
  */
-struct hash_desc *descs;
+static struct hash_desc *descs;
 static int page_to_hash(const void *src, u8 *result, int thread_id)
 {
 
@@ -677,8 +677,9 @@ static int ycache_pampd_get_data(char *data, size_t *bufsize, bool raw,
 	u8 *src, *dst;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
-	// BUG_ON(is_ephemeral(pool));
-	// BUG_ON(pampd == NULL);
+	BUG_ON(is_ephemeral(pool));
+	BUG_ON(pampd == NULL);
+
 	/* This function should not be called for now */
 	BUG();
 	BUG_ON(data == NULL);
@@ -728,8 +729,7 @@ static int ycache_pampd_get_data_and_free(char *data, size_t *bufsize, bool raw,
 	ycache_entry_cache_free(ycache_entry);
 
 	/* We don't aquire the lock here since pampd is not NULL, it's safe to
-	 * assume that page_entry can't disappear when being used.
-	 */
+	 assume that page_entry can't disappear when being used */
 	/* Get a copy of page */
 	src = kmap_atomic(page_entry->page);
 	dst = kmap_atomic((struct page *)data);
@@ -885,8 +885,8 @@ static void ycache_cleancache_do_put_page(struct ycache_work *work)
 			ycache_put_pool(pool);
 			goto fail;
 		}
+		ycache_put_pool(pool);
 	}
-	ycache_put_pool(pool);
 	return;
 fail:
 	/* flush if put failed */
@@ -907,13 +907,11 @@ static int ycache_cleancache_get_page(int pool_id,
 	uint32_t tmp_index = (uint32_t)index;
 	size_t size = PAGE_SIZE;
 	int ret = -1;
-	// unsigned long flags;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
 	if (unlikely(tmp_index != index))
 		goto out;
 
-	// local_irq_save(flags);
 	pool = ycache_get_pool_by_id(pool_id);
 	if (likely(pool != NULL)) {
 		if (likely(atomic_read(&pool->obj_count) > 0))
@@ -921,7 +919,6 @@ static int ycache_cleancache_get_page(int pool_id,
 				       &size, 0, is_ephemeral(pool));
 		ycache_put_pool(pool);
 	}
-// local_irq_restore(flags);
 out:
 	return ret;
 }
@@ -933,21 +930,40 @@ static void ycache_cleancache_flush_page(int pool_id,
 	struct tmem_pool *pool;
 	struct tmem_oid *oid = (struct tmem_oid *)&key;
 	uint32_t tmp_index = (uint32_t)index;
+	struct ycache_work *work;
+	struct ycache_work *tmp_work;
+	int thread_id;
 	int ret = -1;
-	// unsigned long flags;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
 	if (unlikely(tmp_index != index))
 		return;
 
-	// local_irq_save(flags);
+	thread_id = index % THREADS_COUNT;
+
+	/* check if ycache_workqueue contains such page */
+	spin_lock(&ycache_workqueues[thread_id].lock);
+	if (unlikely(!list_empty(&ycache_workqueues[thread_id].list))) {
+		list_for_each_entry_safe(
+		    work, tmp_work, &ycache_workqueues[thread_id].list, node)
+		{
+			if (work->index == index &&
+			    tmem_oid_compare((struct tmem_oid *)(&work->key),
+					     oid) == 0 &&
+			    work->pool_id == pool_id) {
+				list_del_init(&work->node);
+				work_cache_free(work);
+			}
+		}
+	}
+	spin_unlock(&ycache_workqueues[thread_id].lock);
+
 	pool = ycache_get_pool_by_id(pool_id);
 	if (likely(pool != NULL)) {
 		if (likely(atomic_read(&pool->obj_count) > 0))
 			ret = tmem_flush_page(pool, oid, tmp_index);
 		ycache_put_pool(pool);
 	}
-	// local_irq_restore(flags);
 	if (likely(ret >= 0))
 		ycache_flush_page_found++;
 }
@@ -957,18 +973,37 @@ static void ycache_cleancache_flush_inode(int pool_id,
 {
 	struct tmem_pool *pool;
 	struct tmem_oid *oid = (struct tmem_oid *)&key;
+	struct ycache_work *work;
+	struct ycache_work *tmp_work;
+	int i;
 	int ret = -1;
-	// unsigned long flags;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
-	// local_irq_save(flags);
+	/* check if ycache_workqueue contains such page */
+	for (i = 0; i < THREADS_COUNT; i++) {
+		spin_lock(&ycache_workqueues[i].lock);
+		if (unlikely(!list_empty(&ycache_workqueues[i].list))) {
+			list_for_each_entry_safe(
+			    work, tmp_work, &ycache_workqueues[i].list, node)
+			{
+				if (tmem_oid_compare(
+					(struct tmem_oid *)(&work->key), oid) ==
+					0 &&
+				    work->pool_id == pool_id) {
+					list_del_init(&work->node);
+					work_cache_free(work);
+				}
+			}
+		}
+		spin_unlock(&ycache_workqueues[i].lock);
+	}
+
 	pool = ycache_get_pool_by_id(pool_id);
 	if (likely(pool != NULL)) {
 		if (likely(atomic_read(&pool->obj_count) > 0))
 			ret = tmem_flush_object(pool, oid);
 		ycache_put_pool(pool);
 	}
-	// local_irq_restore(flags);
 	if (likely(ret >= 0))
 		ycache_flush_obj_found++;
 }
