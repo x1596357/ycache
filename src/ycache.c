@@ -84,10 +84,9 @@ static atomic_t ycache_objnode_count = ATOMIC_INIT(0);
 static u64 ycache_objnode_fail;
 static u64 ycache_obj_fail;
 
-static int THREADS_COUNT = 3;
-//#define WORKS_COUNT (THREADS_COUNT * 4096)
+static int const THREADS_COUNT = 3;
 
-/* represent a put*/
+/* represent a put */
 struct ycache_work {
 	int pool_id;
 	struct cleancache_filekey key;
@@ -156,10 +155,6 @@ struct ycache_workqueue {
 
 /* array of ycache workqueue */
 static struct ycache_workqueue *ycache_workqueues;
-/* queue for storing empty ycache_work to be used */
-// static struct ycache_workqueue free_workqueue;
-/* semaphore for free_workqueue */
-// static struct semaphore free_workqueue_semaphore;
 /* task_struct for threads */
 static struct task_struct **threads;
 
@@ -633,7 +628,7 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 			goto reject_page_entry;
 		} else {
 			/* this page is used to store unique page, set it to
-			NULL so it won't be in ycache_thread */
+			NULL so it won't be freed in ycache_thread */
 			this_work->page = NULL;
 			spin_lock(&free_list_lock);
 			/* add to free list */
@@ -828,9 +823,15 @@ static void ycache_cleancache_put_page(int pool_id,
 
 	/*pr_debug("%s in_atomic():%d irqs_disabled():%d\n", __FUNCTION__,
 		 in_atomic(), irqs_disabled());*/
+	// Shrinker is being called, reject all puts
+	if (unlikely(ycache_is_shrinking())) {
+		ycache_failed_puts++;
+		return;
+	}
+
 	this_work = work_cache_alloc();
 	if (this_work == NULL) {
-		pr_debug("%s return\n", __FUNCTION__);
+		// pr_debug("%s return\n", __FUNCTION__);
 		return;
 	} else {
 		this_work->pool_id = pool_id;
@@ -864,12 +865,6 @@ static void ycache_cleancache_do_put_page(struct ycache_work *work)
 	// pr_debug("call %s()\n", __FUNCTION__);
 	/*pr_debug("%s in_atomic():%d irqs_disabled():%d\n", __FUNCTION__,
 		 in_atomic(), irqs_disabled());*/
-
-	// Shrinker is being called, reject all puts
-	if (unlikely(ycache_is_shrinking())) {
-		ycache_failed_puts++;
-		goto fail;
-	}
 
 	if (unlikely(tmp_index != work->index)) {
 		ycache_failed_puts++;
