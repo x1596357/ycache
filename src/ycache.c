@@ -765,8 +765,9 @@ static void ycache_cleancache_put_page(int pool_id,
 			ycache_put_pool(pool);
 			goto fail;
 		}
+		ycache_put_pool(pool);
 	}
-	ycache_put_pool(pool);
+
 	return;
 fail:
 	/* flush if put failed */
