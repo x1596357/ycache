@@ -240,7 +240,7 @@ static void page_rb_erase(struct rb_root *root, struct page_entry *entry)
 	// pr_debug("call %s()\n", __FUNCTION__);
 	if (likely(!RB_EMPTY_NODE(&entry->rbnode))) {
 		rb_erase(&entry->rbnode, root);
-		// RB_CLEAR_NODE(&entry->rbnode);
+		RB_CLEAR_NODE(&entry->rbnode);
 	}
 }
 
