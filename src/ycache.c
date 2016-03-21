@@ -758,8 +758,8 @@ static void ycache_cleancache_put_page(int pool_id,
 
 	pool = ycache_get_pool_by_id(pool_id);
 	if (likely(pool != NULL)) {
-		ret = tmem_put(pool, oid, index, (char *)(page), PAGE_SIZE, 0,
-			       is_ephemeral(pool));
+		ret = tmem_put(pool, oid, tmp_index, (char *)(page), PAGE_SIZE,
+			       0, is_ephemeral(pool));
 		if (unlikely(ret < 0)) {
 			ycache_failed_puts++;
 			ycache_put_pool(pool);
@@ -772,7 +772,7 @@ fail:
 	/* flush if put failed */
 	pool = ycache_get_pool_by_id(pool_id);
 	if (likely(pool != NULL && atomic_read(&pool->obj_count) > 0)) {
-		(void)tmem_flush_page(pool, oid, index);
+		(void)tmem_flush_page(pool, oid, tmp_index);
 	}
 	ycache_put_pool(pool);
 	ycache_put_to_flush++;
@@ -797,8 +797,8 @@ static int ycache_cleancache_get_page(int pool_id,
 	pool = ycache_get_pool_by_id(pool_id);
 	if (likely(pool != NULL)) {
 		if (likely(atomic_read(&pool->obj_count) > 0))
-			ret = tmem_get(pool, oid, index, (char *)(page), &size,
-				       0, is_ephemeral(pool));
+			ret = tmem_get(pool, oid, tmp_index, (char *)(page),
+				       &size, 0, is_ephemeral(pool));
 		ycache_put_pool(pool);
 	}
 // local_irq_restore(flags);
@@ -824,7 +824,7 @@ static void ycache_cleancache_flush_page(int pool_id,
 	pool = ycache_get_pool_by_id(pool_id);
 	if (likely(pool != NULL)) {
 		if (likely(atomic_read(&pool->obj_count) > 0))
-			ret = tmem_flush_page(pool, oid, index);
+			ret = tmem_flush_page(pool, oid, tmp_index);
 		ycache_put_pool(pool);
 	}
 	// local_irq_restore(flags);
