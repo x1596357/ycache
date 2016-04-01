@@ -258,7 +258,7 @@ static void page_entry_nr_dec(struct rb_root *rbroot, struct page_entry *entry)
  *
  * Return:  0 if the caculation is successful, <0 if an error occurred
  */
-struct hash_desc desc;
+static struct hash_desc desc;
 static int page_to_hash(const void *src, u8 *result)
 {
 	struct scatterlist sg;
