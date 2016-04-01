@@ -184,33 +184,9 @@ static void page_entry_cache_free(struct page_entry *entry)
 /*********************************
 * page_entry rbtree functions
 **********************************/
-static struct page_entry *page_rb_search(struct rb_root *root, u8 *hash)
-{
-	struct rb_node *node = root->rb_node;
-	struct page_entry *entry;
-	int result;
-
-	// pr_debug("call %s()\n", __FUNCTION__);
-	while (node) {
-		entry = rb_entry(node, struct page_entry, rbnode);
-		result = memcmp(entry->hash, hash, HASH_DIGEST_SIZE);
-		if (result > 0)
-			node = node->rb_left;
-		else if (result < 0)
-			node = node->rb_right;
-		else
-			return entry;
-	}
-	return NULL;
-}
-
-/*
- * In the case that a entry with the same values is found, a pointer to
- * the existing entry is stored in dupentry and the function returns
- * -EEXIST
- */
-static int page_rb_insert(struct rb_root *root, struct page_entry *entry,
-			  struct page_entry **dupentry)
+static struct page_entry *page_rb_search_cached(struct rb_root *root, u8 *hash,
+						struct rb_node **out_parent,
+						struct rb_node ***out_link)
 {
 	struct rb_node **link = &root->rb_node, *parent = NULL;
 	struct page_entry *tmp_entry;
@@ -220,16 +196,26 @@ static int page_rb_insert(struct rb_root *root, struct page_entry *entry,
 	while (*link) {
 		parent = *link;
 		tmp_entry = rb_entry(parent, struct page_entry, rbnode);
-		result = memcmp(tmp_entry->hash, entry->hash, HASH_DIGEST_SIZE);
+		result = memcmp(tmp_entry->hash, hash, HASH_DIGEST_SIZE);
 		if (result > 0)
 			link = &(*link)->rb_left;
 		else if (result < 0)
 			link = &(*link)->rb_right;
 		else {
-			*dupentry = tmp_entry;
-			return -EEXIST;
+			/* found entry, parent and link should not be used */
+			return tmp_entry;
 		}
 	}
+
+	/* cache parent and link for later insertion */
+	*out_parent = parent;
+	*out_link = link;
+	return NULL;
+}
+
+static int page_rb_insert_cached(struct rb_root *root, struct page_entry *entry,
+				 struct rb_node *parent, struct rb_node **link)
+{
 	rb_link_node(&entry->rbnode, parent, link);
 	rb_insert_color(&entry->rbnode, root);
 	return 0;
@@ -492,14 +478,14 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 				 uint32_t index)
 {
 	void *pampd = NULL;
-	struct ycache_entry *ycache_entry;
-	struct rb_root *rbroot;
-	struct page_entry *page_entry;
-	struct page *page;
-	struct page_entry *dupentry;
-	int result;
-	u8 hash[HASH_DIGEST_SIZE];
-	u8 *src, *dst;
+	struct ycache_entry *ycache_entry = NULL;
+	struct rb_root *rbroot = NULL;
+	struct page_entry *page_entry = NULL;
+	struct rb_node *parent = NULL;
+	struct rb_node **link = NULL;
+	struct page *page = NULL;
+	u8 hash[HASH_DIGEST_SIZE] = {0};
+	u8 *src = NULL, *dst = NULL;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
 	/*pr_debug("%s in_atomic():%d irqs_disabled():%d\n", __FUNCTION__,
@@ -523,13 +509,12 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 
 	rbroot = get_rbroot(hash);
 	spin_lock(&ycache_host.lock);
-	page_entry = page_rb_search(rbroot, hash);
+	page_entry = page_rb_search_cached(rbroot, hash, &parent, &link);
 	/* hash not exists */
-	if (likely(page_entry == NULL)) {
-		spin_unlock(&ycache_host.lock);
-
+	if (page_entry == NULL) {
 		page_entry = page_entry_cache_alloc(YCACHE_GFP_MASK);
 		if (unlikely(page_entry == NULL)) {
+			spin_unlock(&ycache_host.lock);
 			goto reject_page_entry;
 		}
 		/* copy page */
@@ -540,26 +525,18 @@ static void *ycache_pampd_create(char *data, size_t size, bool raw, int eph,
 		kunmap_atomic(src);
 		/* copy hash values */
 		memcpy(page_entry->hash, hash, HASH_DIGEST_SIZE);
-
-		/* set page_entry before holding lock */
+		/* copy page_entry to ycache_entry for later reference */
 		ycache_entry->page_entry = page_entry;
-
-		spin_lock(&ycache_host.lock);
-		/* TODO: maybe we can cache some node in rbtree from page search
-		  to reduce rbtree search overhead */
-		result = page_rb_insert(rbroot, page_entry, &dupentry);
-		// this rarely happens, it has to be taken cared of (reject)
-		// should it happen
-		if (unlikely(result == -EEXIST)) {
-			spin_unlock(&ycache_host.lock);
-			page_entry_cache_free(page_entry);
-			goto reject_page_entry;
-		} else {
-			/* add to free list */
-			list_add_tail(&ycache_entry->list, &ycache_entry_list);
-			spin_unlock(&ycache_host.lock);
-			pampd = (void *)ycache_entry;
-		}
+		/*
+		* insert page entry to rb-tree
+		* use parent and link cached from page_rb_search_cached()
+		* if page_entry is not NULL, parent and link should not be used
+		*/
+		page_rb_insert_cached(rbroot, page_entry, parent, link);
+		/* add to free list */
+		list_add_tail(&ycache_entry->list, &ycache_entry_list);
+		spin_unlock(&ycache_host.lock);
+		pampd = (void *)ycache_entry;
 	}
 	/* hash exists, compare bit by bit */
 	else if (likely(is_page_same(page_entry->page, page))) {
