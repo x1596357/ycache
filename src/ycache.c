@@ -90,7 +90,7 @@ static int const THREADS_COUNT = 3;
 struct ycache_work {
 	int pool_id;
 	struct cleancache_filekey key;
-	pgoff_t index;
+	uint32_t index;
 	struct page *page;
 	struct list_head node;
 	u8 hash[HASH_DIGEST_SIZE];
@@ -798,9 +798,17 @@ static void ycache_cleancache_put_page(int pool_id,
 	u8 *src, *dst;
 	int thread_id;
 	struct ycache_work *this_work;
+	uint32_t tmp_index;
 
+	// pr_debug("call %s()\n", __FUNCTION__);
 	/*pr_debug("%s in_atomic():%d irqs_disabled():%d\n", __FUNCTION__,
 		 in_atomic(), irqs_disabled());*/
+	tmp_index = (uint32_t)index;
+	if (unlikely(tmp_index != index)) {
+		ycache_failed_puts++;
+		return;
+	}
+
 	// Shrinker is being called, reject all puts
 	if (unlikely(ycache_is_shrinking())) {
 		ycache_failed_puts++;
@@ -814,7 +822,7 @@ static void ycache_cleancache_put_page(int pool_id,
 	} else {
 		this_work->pool_id = pool_id;
 		this_work->key = key;
-		this_work->index = index;
+		this_work->index = tmp_index;
 
 		/* copy page */
 		src = kmap_atomic(page);
@@ -823,7 +831,7 @@ static void ycache_cleancache_put_page(int pool_id,
 		kunmap_atomic(dst);
 		kunmap_atomic(src);
 
-		thread_id = index % THREADS_COUNT;
+		thread_id = this_work->index % THREADS_COUNT;
 		// pr_info("allocate put to thread/%d", thread_id);
 		spin_lock(&ycache_workqueues[thread_id].lock);
 		list_add_tail(&this_work->node,
@@ -837,23 +845,18 @@ static void ycache_cleancache_do_put_page(struct ycache_work *work)
 {
 	struct tmem_pool *pool;
 	struct tmem_oid *oid = (struct tmem_oid *)&work->key;
-	uint32_t tmp_index = (uint32_t)work->index;
+	uint32_t index = work->index;
 	int ret = -1;
 	unsigned long flags;
 
 	// pr_debug("call %s()\n", __FUNCTION__);
 	/*pr_debug("%s in_atomic():%d irqs_disabled():%d\n", __FUNCTION__,
 		 in_atomic(), irqs_disabled());*/
-
-	if (unlikely(tmp_index != work->index)) {
-		ycache_failed_puts++;
-		goto fail;
-	}
 	local_irq_save(flags);
 	pool = ycache_get_pool_by_id(work->pool_id);
 	if (likely(pool != NULL)) {
-		ret = tmem_put(pool, oid, tmp_index, (char *)(work), PAGE_SIZE,
-			       0, is_ephemeral(pool));
+		ret = tmem_put(pool, oid, index, (char *)(work), PAGE_SIZE, 0,
+			       is_ephemeral(pool));
 		if (unlikely(ret < 0)) {
 			ycache_failed_puts++;
 			ycache_put_pool(pool);
@@ -868,7 +871,7 @@ fail:
 	local_irq_save(flags);
 	pool = ycache_get_pool_by_id(work->pool_id);
 	if (likely(pool != NULL && atomic_read(&pool->obj_count) > 0)) {
-		(void)tmem_flush_page(pool, oid, tmp_index);
+		(void)tmem_flush_page(pool, oid, index);
 	}
 	ycache_put_pool(pool);
 	local_irq_restore(flags);
