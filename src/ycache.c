@@ -89,8 +89,8 @@ static int const THREADS_COUNT = 3;
 /* represent a put */
 struct ycache_work {
 	int pool_id;
-	struct cleancache_filekey key;
 	uint32_t index;
+	struct cleancache_filekey key;
 	struct page *page;
 	struct list_head node;
 	u8 hash[HASH_DIGEST_SIZE];
