@@ -1,38 +1,3 @@
-Linux内核页面缓存去重模块
-
-安装：
-在本目录下输入以下指令
-# make -j
-编译成功后会有ycache.ko文件在当本目录下
-插入模块，需要root权限:
-# sudo insmod ycache.ko
-插入成功后使用以下命令应该能看到模块加载信息
-# dmesg
-因为Cleancache不提供卸载功能，如果要关闭本页面缓存系统请关闭或重启计算机。
-
-要更改工作线程数请修改源代码src/ycache.c中THREADS_COUNT值，默认为
-static int const THREADS_COUNT = 3;
-保存后重新编译并插入模块。
-
-
-辅助组件，在utils目录下.
-查看该页面缓存系统的统计计数器信息，需要root权限:
-# sudo ./utils/viewDebugfs.sh
-
-数据重复率检测工具：
-安装：
-# cd ./utils/getDuplicateRate&&make -j
-使用,跟文件参数，比如dump，跟分块大小，比如4K，跟是否包括全零块，是则输入1，否则输入0：
-# ./getDuplicateRate dump 4096 1
-
-强制page cache丢弃页面进程，使用该进程可以自定义阈值使page cache丢弃页面，正常不需要使用。
-安装
-# cd ./utils/flushPagecached&&make -j
-使用。需要以root身份执行：
-该进程检查内存使用信息每argv[1]秒，如果CPU使用率小于argv[2]%并且空闲内存(完全空闲)加上缓冲(buffer)小于阈值argv[3] KB，那么丢弃page cache中的页面。
-
-# sudo ./flushPagecached 30 50 40960 &
-
 Linux Kernel pagecache deduplicate module
 
 Install：
@@ -65,5 +30,41 @@ Install:
 
 Check memory every argv[1] seconds，if CPU usage if under argv[2]% and free memory(Totally free, not buffer or cache etc)
 adding buffer memory is less than argv[3] KB，then page cache is dropped.
+
+# sudo ./flushPagecached 30 50 40960 &
+
+
+Linux内核页面缓存去重模块
+
+安装：
+在本目录下输入以下指令
+# make -j
+编译成功后会有ycache.ko文件在当本目录下
+插入模块，需要root权限:
+# sudo insmod ycache.ko
+插入成功后使用以下命令应该能看到模块加载信息
+# dmesg
+因为Cleancache不提供卸载功能，如果要关闭本页面缓存系统请关闭或重启计算机。
+
+要更改工作线程数请修改源代码src/ycache.c中THREADS_COUNT值，默认为
+static int const THREADS_COUNT = 3;
+保存后重新编译并插入模块。
+
+
+辅助组件，在utils目录下.
+查看该页面缓存系统的统计计数器信息，需要root权限:
+# sudo ./utils/viewDebugfs.sh
+
+数据重复率检测工具：
+安装：
+# cd ./utils/getDuplicateRate&&make -j
+使用,跟文件参数，比如dump，跟分块大小，比如4K，跟是否包括全零块，是则输入1，否则输入0：
+# ./getDuplicateRate dump 4096 1
+
+强制page cache丢弃页面进程，使用该进程可以自定义阈值使page cache丢弃页面，正常不需要使用。
+安装
+# cd ./utils/flushPagecached&&make -j
+使用。需要以root身份执行：
+该进程检查内存使用信息每argv[1]秒，如果CPU使用率小于argv[2]%并且空闲内存(完全空闲)加上缓冲(buffer)小于阈值argv[3] KB，那么丢弃page cache中的页面。
 
 # sudo ./flushPagecached 30 50 40960 &
